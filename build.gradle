@@ -1,0 +1,112 @@
+plugins {
+    id 'java'
+    id 'application'
+    id 'org.openapi.generator' version '7.3.0'
+}
+
+group = 'com.jobscrapper'
+version = '1.0.0'
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_21
+    targetCompatibility = JavaVersion.VERSION_21
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    // Web Scraping
+    implementation 'org.jsoup:jsoup:1.17.2'
+
+    //playwright for browser automation
+    implementation 'com.microsoft.playwright:playwright:1.50.0'
+    
+    //Http client (needed for Direct http requests)
+    implementation 'org.apache.httpcomponents.client5:httpclient5:5.3.1'
+    implementation 'org.apache.httpcomponents.core5:httpcore5:5.2.4'
+
+    //Logging
+    implementation 'org.slf4j:slf4j-api:2.0.9'
+    implementation 'ch.qos.logback:logback-classic:1.5.15'
+
+    //Json Processing
+    implementation 'com.fasterxml.jackson.core:jackson-databind:2.17.0'
+    implementation 'com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.17.0'
+    implementation 'org.openapitools:jackson-databind-nullable:0.2.6'
+    implementation 'com.google.code.findbugs:jsr305:3.0.2'
+    implementation 'javax.annotation:javax.annotation-api:1.3.2'
+
+    //Testsing
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.10.1'
+    testImplementation 'org.mockito:mockito-core:5.8.0'
+    testImplementation 'org.assertj:assertj-core:3.24.2'
+}
+
+application {
+    mainClass = 'com.jobscrapper.JobScrapperApplication'
+}
+
+test {
+    useJUnitPlatform()
+}
+
+// Disable default openApiGenerate task - we'll create custom ones for each YAML file
+afterEvaluate {
+    tasks.named('openApiGenerate') {
+        enabled = false
+    }
+}
+
+// Find all YAML files in schemas directory
+def yamlFiles = fileTree("$rootDir/models/schemas") {
+    include "*.yaml"
+}.files
+
+// Dynamically create OpenAPI Generate tasks for each YAML file
+yamlFiles.each { yamlFile ->
+    def baseName = yamlFile.name.replace('.yaml', '').replace('-', '')
+    def taskName = "openApiGenerate${baseName.capitalize()}"
+    def outputDir = new File(project.buildDir, "generated/openapi/${baseName}")
+    
+    tasks.register(taskName, Exec) {
+        doFirst {
+            outputDir.mkdirs()
+        }
+        commandLine 'npx', '--yes', '@openapitools/openapi-generator-cli', 'generate',
+            '-i', yamlFile.absolutePath,
+            '-g', 'java',
+            '-o', outputDir.absolutePath,
+            '--additional-properties', 'packageName=com.jobscrapper,apiPackage=com.jobscrapper.api,modelPackage=com.jobscrapper.model,invokerPackage=com.jobscrapper,dateLibrary=java8,library=native'
+    }
+}
+
+// Create a task that runs all openApiGenerate tasks
+tasks.register('generateAllOpenApiModels') {
+    dependsOn tasks.matching { it.name.startsWith('openApiGenerate') && it.name != 'generateAllOpenApiModels' }
+}
+
+// Make Java compile and process resources depend on all OpenAPI generation
+compileJava.dependsOn 'generateAllOpenApiModels'
+processResources.dependsOn 'generateAllOpenApiModels'
+
+// Add generated sources from all YAML files to the main source set
+sourceSets {
+    main {
+        java {
+            // Include all generated Java sources from all YAML files
+            fileTree("$rootDir/models/schemas").include("*.yaml").each { yamlFile ->
+                def outputDir = "$buildDir/generated/openapi/${yamlFile.name.replace('.yaml', '')}"
+                srcDir "$outputDir/src/main/java"
+            }
+        }
+        resources {
+            // Include all generated resources from all YAML files
+            fileTree("$rootDir/models/schemas").include("*.yaml").each { yamlFile ->
+                def outputDir = "$buildDir/generated/openapi/${yamlFile.name.replace('.yaml', '')}"
+                srcDir "$outputDir/src/main/resources"
+            }
+        }
+    }
+}

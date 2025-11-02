@@ -1,0 +1,279 @@
+openapi: 3.0.3
+info:
+  title: Job Scraper API
+  version: 1.0.0
+  description: |
+    API for scraping job listings from various job boards
+    using Playwright for browser automation in Java.
+    Used by MCP agents for background scraping and React UI for displaying results.
+
+servers:
+  - url: http://localhost:8080/api
+    description: Local development server
+  - url: https://api.jobscrapper.com/api
+    description: Production server
+
+paths:
+  /scraping/start:
+    post:
+      summary: Start of a scraping job
+      description: Initiates a new scraping job using Playwright. Called by MCP agents to start a new job.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+             $ref: '#/components/schemas/ScrapingJobRequest'
+      responses:
+        '202':
+          description: Scraping job started successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ScrapingJob'
+
+        '400':
+          description: Bad request - wrong/bad parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /jobs:
+    get:
+      summary: List of jobs scraped
+      description: Returns a list of jobs scraped from the sources. 
+      parameters:
+        - name: scrapingId
+          in: query
+          schema:
+            type: string
+          description: The scraping Id for the jobs to list
+
+        - name: page
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+          description: The page number to return
+
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 25
+          description: Number of Jobs per page
+
+      responses: 
+        '200':
+          description: List of Jobs scraped successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobListResponse'
+
+        '400':
+          description: Bad request - wrong/bad parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+
+
+components:
+  schemas:
+    Job:
+      type: object
+      required:
+        - id
+        - title
+        - company
+        - url
+        - postedDate
+        - source
+        - location
+        - description
+      properties:
+        id:
+          type: string
+          description: Unique identifier for the job
+        
+        title:
+          type: string
+          description: The title of the Job
+        
+        company:
+          type: string
+          description: The Company name
+        
+        url:
+          type: string
+          description: The URL of the job
+        
+        postedDate:
+          type: string
+          format: date-time
+          description: The date of the job posting
+        
+        source:
+          type: string
+          description: The source of the job
+        
+        location:
+          type: string
+          description: The location of the job
+        
+        description:
+          type: string
+          description: The description of the job
+    
+    JobListResponse:
+      type: object
+      required:
+        - jobs
+        - total
+        - page
+        - limit
+      properties:
+        jobs:
+          type: array
+          items:
+            $ref: '#/components/schemas/Job'
+          description: List of jobs
+        
+        total:
+          type: integer
+          description: Total number of jobs matching the filters
+        
+        page:
+          type: integer
+          description: Current page number
+        
+        limit:
+          type: integer
+          description: Number of Jobs per page
+        
+        totalPages:
+          type: integer
+          description: Total number of pages
+
+    ScrapingJob:
+      type: object
+      required:
+        - scrapingId
+        - status
+      properties:
+        scrapingId:
+          type: string
+          description: Unique identifier for the scraping jobs
+        
+        status:
+          type: string
+          enum: [STARTED, RUNNING, COMPLETED, FAILED, CANCELLED]
+          description: current status of the scraping job
+        
+        startedAt:
+          type: string
+          format: date-time
+          description: when the scraping started
+        
+    ScrapingStatus:
+      type: object
+      required:
+        - scrapingId
+        - status
+        - jobsFound
+      properties:
+        scrapingId:
+          type: string
+          description: Unique identifier for the scraping job
+
+        status:
+          type: string
+          enum: [STARTED, RUNNING, COMPLETED, FAILED, CANCELLED]
+          description: current status of the scraping job
+
+        jobsFound:
+          type: integer
+          description: Number of jobs found so far
+
+        jobsProcessed:
+          type: integer
+          description: Number of jobs processed
+
+        currentSource:
+          type: string
+          description: Currently scraping source (if running) 
+
+        startedAt:
+          type: string
+          format: date-time   
+          description: when the scraping started
+        
+        completedAt:
+          type: string
+          format: date-time
+          description: when the scraping completed (if finished)
+        
+        error:
+          type: string
+          description: Error message (if failed)
+    
+    Error:
+      type: object
+      required: 
+        - message
+      properties:
+        message:
+          type: string
+          description: Error message
+        
+        code:
+          type: string
+          description: Error code
+        
+        details:
+          type: object
+          description: Additional error details
+
+    ScrapingJobRequest:
+      type: object
+      required:
+        - sources
+        - keywords
+      properties:
+        sources:
+          type: array
+          items:
+            type: string
+            enum: [LinkedIn, Indeed, Glassdoor, Jobright, Ziprecruiter, monster, Dice, careerBuilder]
+          description: The sources of the jobs to scrape
+
+        keywords:
+          type: array
+          items:
+            type: string
+          description: The keywords to search for in the jobs
+          example: ["software engineer", "java developer", "backend developer"]
+
+        location:
+          type: string
+          description: The location of the searched jobs
+          example: "Boston, New York, San Francisco"  
+        
+        maxResults:
+          type: integer
+          description: The number of jobs to scrape per source
+          example: 100
+          default: 25
+
+     
+          
+          
+
+
+        
