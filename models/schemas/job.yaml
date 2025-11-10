@@ -82,6 +82,59 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
 
+  
+  /jobs/{id}:
+    get:
+      summary: Get Job by Id
+      description: Returns a job by its id.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Job identifier
+      responses:
+        '200':
+          description: Job Found Successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Job'
+        
+        '404':
+          description: Job Not Found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /scraping/{id}:
+    delete:
+      summary: Stop a scraping job
+      description: Stops a scraping job by its id
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Scraping Id
+
+      responses:
+        '200':
+          description: Scraping job stopped successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ScrapingStatus'
+        
+        '404':
+          description: Bad Request - Scraping Job not Found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'            
 
 
 components:
