@@ -16,7 +16,7 @@ public class InMemoryJobRepository implements JobRepository{
 
     @Override
     public JobListReponse findByScrapingId(String scrapinId, int page, int limit){
-        List<Job> jobList = jobs.values().stream()
+        List<Job> jobList = jobs.values().stream() // using stream to filter and sort the jobs
                 .filter(job -> scrapingId == null || scrapingId.equals(job.getSource()))
                 .sorted((a, b) -> b.getPostedDate().compareTo(a.getPostedDate()))
                 .collect(Collectors.toList());
