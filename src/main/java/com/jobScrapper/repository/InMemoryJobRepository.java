@@ -10,7 +10,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 public class InMemoryJobRepository implements JobRepository {
-
+    
     private final Map<String, Job> jobs = new ConcurrentHashMap<>();
 
     @Override

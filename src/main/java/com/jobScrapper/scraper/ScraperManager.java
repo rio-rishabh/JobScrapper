@@ -30,10 +30,7 @@ public class ScraperManager {
         return Optional.ofNullable(scrapers.get(source.toLowerCase()));
     }
 
-    public void 
-    
-    
-    runScraper(String source, ScrapingJobRequest request, Consumer<Job> sink) throws Exception {
+    public void runScraper(String source, ScrapingJobRequest request, Consumer<Job> sink) throws Exception {
         JobScraper scraper = getScraper(source).orElseThrow(() -> new IllegalArgumentException("No scraper for source: " + source));
         scraper.scrape(request, sink);
     }

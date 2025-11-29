@@ -45,7 +45,9 @@ dependencies {
 }
 
 application {
-    mainClass = 'com.jobscrapper.JobScrapperApplication'
+    // Main class for testing scrapers from multiple platforms
+    mainClass = 'com.jobScrapper.test.ScraperMain'
+    // Change to 'com.jobscrapper.JobScrapperApplication' when creating the actual REST API application
 }
 
 test {
