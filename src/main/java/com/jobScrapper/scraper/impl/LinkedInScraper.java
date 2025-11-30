@@ -71,52 +71,143 @@ public class LinkedInScraper extends BaseJobScraper {
 
     @Override
     protected Job extractJobData(Locator jobElement, Page page) {
-        // Extract job title
+        // Wait a bit for content to load within the job element
+        try {
+            page.waitForTimeout(300); // Small wait for dynamic content
+        } catch (Exception e) {
+            // Ignore
+        }
+        
+        // Extract job title with better error handling - try multiple selectors
+        // LinkedIn job titles are often in nested spans or links
         String title = "";
-        try {
-            title = jobElement.locator("a.job-card-list__title").first().textContent().trim();
-        } catch (Exception e) {
-            System.err.println("[" + getSource() + "] Error extracting title: " + e.getMessage());
+        String[] titleSelectors = {
+            "a.job-card-list__title",
+            "h3.job-card-list__title",
+            "a[data-tracking-control-name='job-card-title']",
+            "span.job-card-list__title",
+            "h3 a",
+            "a.base-search-card__title",
+            "h3.base-search-card__title",
+            "a[class*='job-card-list__title']",
+            // Try finding any link or heading in the job card
+            "h3",
+            "a[href*='/jobs/view/']",
+            "a[href*='/jobs/']"
+        };
+        for (String selector : titleSelectors) {
+            try {
+                Locator titleLocator = jobElement.locator(selector).first();
+                if (titleLocator.count() > 0) {
+                    // Wait for element to be visible
+                    try {
+                        titleLocator.waitFor(new Locator.WaitForOptions().setTimeout(3000));
+                    } catch (Exception e) {
+                        // Continue even if wait fails
+                    }
+                    String titleText = titleLocator.textContent();
+                    if (titleText != null && !titleText.trim().isEmpty()) {
+                        title = titleText.trim();
+                        break;
+                    }
+                }
+            } catch (Exception e) {
+                continue; // Try next selector
+            }
+        }
+        if (title.isEmpty()) {
+            System.err.println("[" + getSource() + "] Error extracting title: No matching selector found");
         }
 
-        // Extract company
+        // Extract company with better error handling - try multiple selectors
         String company = "";
-        try {
-            company = jobElement.locator("a.job-card-container__company-name").first().textContent().trim();
-        } catch (Exception e) {
-            System.err.println("[" + getSource() + "] Error extracting company: " + e.getMessage());
+        String[] companySelectors = {
+            "a.job-card-container__company-name",
+            "h4.job-card-container__company-name",
+            "span.job-card-container__company-name",
+            "a[data-tracking-control-name='job-card-company']",
+            "h4 a"
+        };
+        for (String selector : companySelectors) {
+            try {
+                Locator companyLocator = jobElement.locator(selector).first();
+                if (companyLocator.count() > 0) {
+                    companyLocator.waitFor(new Locator.WaitForOptions().setTimeout(2000));
+                    String companyText = companyLocator.textContent();
+                    if (companyText != null && !companyText.trim().isEmpty()) {
+                        company = companyText.trim();
+                        break;
+                    }
+                }
+            } catch (Exception e) {
+                continue; // Try next selector
+            }
+        }
+        if (company.isEmpty()) {
+            System.err.println("[" + getSource() + "] Error extracting company: No matching selector found");
         }
 
-        // Extract job URL
+        // Extract job URL with better error handling - try multiple selectors
         String jobURL = "";
-        try {
-            String relativeUrl = jobElement.locator("a.job-card-list__title").first().getAttribute("href");
-            jobURL = relativeUrl != null && relativeUrl.startsWith("https") 
-                ? relativeUrl 
-                : "https://www.linkedin.com" + relativeUrl;
-        } catch (Exception e) {
-            System.err.println("[" + getSource() + "] Error extracting URL: " + e.getMessage());
+        String[] urlSelectors = {
+            "a.job-card-list__title",
+            "h3.job-card-list__title a",
+            "a[data-tracking-control-name='job-card-title']",
+            "a.base-search-card__title",
+            "a[href*='/jobs/view/']",
+            "a[href*='/jobs/']",
+            "a[class*='job-card-list__title']",
+            // Try finding any link with job URL pattern
+            "a[href*='linkedin.com/jobs']"
+        };
+        for (String selector : urlSelectors) {
+            try {
+                Locator urlLocator = jobElement.locator(selector).first();
+                if (urlLocator.count() > 0) {
+                    try {
+                        urlLocator.waitFor(new Locator.WaitForOptions().setTimeout(3000));
+                    } catch (Exception e) {
+                        // Continue even if wait fails
+                    }
+                    String relativeUrl = urlLocator.getAttribute("href");
+                    if (relativeUrl != null && !relativeUrl.isEmpty()) {
+                        jobURL = relativeUrl.startsWith("https") 
+                            ? relativeUrl 
+                            : "https://www.linkedin.com" + relativeUrl;
+                        break;
+                    }
+                }
+            } catch (Exception e) {
+                continue; // Try next selector
+            }
+        }
+        if (jobURL.isEmpty()) {
+            System.err.println("[" + getSource() + "] Error extracting URL: No matching selector found");
         }
 
-        // Extract job location
+        // Extract job location with better error handling
         String location = "Not Specified";
         try {
             Locator locationElement = jobElement.locator("li.job-card-container__metadata-item").first();
-            String locationText = locationElement.textContent();
-            if (locationText != null) {
-                location = locationText.trim();
+            if (locationElement.count() > 0) {
+                String locationText = locationElement.textContent();
+                if (locationText != null) {
+                    location = locationText.trim();
+                }
             }
         } catch (Exception e) {
             System.err.println("[" + getSource() + "] Error extracting location: " + e.getMessage());
         }
 
-        // Extract description
+        // Extract description with better error handling
         String description = "No description available";
         try {
             Locator descriptionElement = jobElement.locator("p.job-card-list__description");
-            String descriptionText = descriptionElement.textContent();
-            if (descriptionText != null) {
-                description = descriptionText.trim();
+            if (descriptionElement.count() > 0) {
+                String descriptionText = descriptionElement.textContent();
+                if (descriptionText != null) {
+                    description = descriptionText.trim();
+                }
             }
         } catch (Exception e) {
             System.err.println("[" + getSource() + "] Error extracting description: " + e.getMessage());

@@ -24,7 +24,7 @@ public abstract class BaseJobScraper implements JobScraper {
         // Step 2: Launch browser instance
         Browser browser = playwright.chromium().launch(new BrowserType.LaunchOptions()
             .setHeadless(false)  // Set to true for production
-            .setSlowMo(200));   // Reduced from 1000ms to 200ms for faster scraping
+            .setSlowMo(100));   // Reduced from 1000ms to 200ms for faster scraping
         
         // Step 3: Create a new page
         Page page = browser.newPage();
@@ -36,25 +36,82 @@ public abstract class BaseJobScraper implements JobScraper {
             System.out.println("[" + getSource() + "] Navigating to: " + searchURL);
             
             // Step 5: Navigate to the search URL
-            page.navigate(searchURL);
+            try {
+                page.navigate(searchURL);
+            } catch (Exception e) {
+                System.err.println("[" + getSource() + "] ⚠️  Navigation error, retrying: " + e.getMessage());
+                page.waitForTimeout(2000);
+                page.navigate(searchURL); // Retry once
+            }
             
             // Step 6: Wait for page to load
             System.out.println("[" + getSource() + "] Waiting for page to load...");
-            page.waitForTimeout(3000);
+            try {
+                page.waitForTimeout(3000);
+                // Wait for page to be in a ready state
+                page.waitForLoadState();
+            } catch (Exception e) {
+                System.err.println("[" + getSource() + "] ⚠️  Load state wait error, continuing: " + e.getMessage());
+                page.waitForTimeout(3000); // Fallback wait
+            }
             
             // Step 7: Handle login if needed (site-specific, optional)
-            handleLoginIfNeeded(page);
+            try {
+                handleLoginIfNeeded(page);
+            } catch (Exception e) {
+                System.err.println("[" + getSource() + "] ⚠️  Error in handleLoginIfNeeded, continuing anyway: " + e.getMessage());
+                // Don't throw - continue with scraping
+            }
             
             // Step 8: Wait for job listings to appear (site-specific selector)
             System.out.println("[" + getSource() + "] Looking for job listings...");
             String jobListSelector = getJobListSelector();
-            page.waitForSelector(jobListSelector, new Page.WaitForSelectorOptions().setTimeout(15000));
-            System.out.println("[" + getSource() + "] ✅ Found job listings");
+            System.out.println("[" + getSource() + "] Using selector: " + jobListSelector);
             
-            // Step 9: Find all job elements
-            Locator jobElements = page.locator(jobListSelector);
+            // Try multiple selectors if the main one fails (for sites like Indeed that use comma-separated selectors)
+            String[] selectors = jobListSelector.contains(",") ? jobListSelector.split(",\\s*") : new String[]{jobListSelector};
+            boolean found = false;
+            Exception lastException = null;
+            String workingSelector = jobListSelector;
+            
+            for (String selector : selectors) {
+                selector = selector.trim();
+                try {
+                    System.out.println("[" + getSource() + "] Trying selector: " + selector);
+                    page.waitForSelector(selector, new Page.WaitForSelectorOptions().setTimeout(20000)); // 20 seconds
+                    System.out.println("[" + getSource() + "] ✅ Found job listings with selector: " + selector);
+                    found = true;
+                    workingSelector = selector; // Use the selector that worked
+                    break;
+                } catch (Exception e) {
+                    lastException = e;
+                    System.out.println("[" + getSource() + "] ⚠️  Selector failed: " + selector);
+                    // Try next selector
+                }
+            }
+            
+            if (!found) {
+                System.err.println("[" + getSource() + "] ❌ All selectors failed to find job listings");
+                System.err.println("[" + getSource() + "]    Tried selectors: " + String.join(", ", selectors));
+                System.err.println("[" + getSource() + "]    Current page URL: " + page.url());
+                System.err.println("[" + getSource() + "]    Current page title: " + page.title());
+                throw new Exception("Failed to find job listings. The page structure may have changed or verification is required.", lastException);
+            }
+            
+            // Step 9: Find all job elements (use the selector that worked)
+            Locator jobElements = page.locator(workingSelector);
             int jobCount = jobElements.count();
-            System.out.println("[" + getSource() + "] Found " + jobCount + " job listings");
+            System.out.println("[" + getSource() + "] Found " + jobCount + " job listings using selector: " + workingSelector);
+            
+            if (jobCount == 0) {
+                System.err.println("[" + getSource() + "] ⚠️  WARNING: No job listings found!");
+                System.err.println("[" + getSource() + "]    Current page URL: " + page.url());
+                System.err.println("[" + getSource() + "]    Current page title: " + page.title());
+                System.err.println("[" + getSource() + "]    This might indicate:");
+                System.err.println("[" + getSource() + "]      - Login/verification required");
+                System.err.println("[" + getSource() + "]      - Page structure changed");
+                System.err.println("[" + getSource() + "]      - No jobs match the search criteria");
+            }
             
             // Step 10: Determine how many jobs to scrape
             Integer maxResultsInt = request.getMaxResults();
@@ -70,18 +127,38 @@ public abstract class BaseJobScraper implements JobScraper {
                     
                     // Scroll the job element into view to ensure it's loaded
                     jobElement.scrollIntoViewIfNeeded();
-                    page.waitForTimeout(200); // Small wait for content to load (reduced from 500ms)
+                    // Wait longer for dynamic content to load (especially for LinkedIn)
+                    page.waitForTimeout(500); // Increased wait for content to load
+                    
+                    // Wait for the job element to be visible
+                    try {
+                        jobElement.waitFor(new Locator.WaitForOptions().setTimeout(3000));
+                    } catch (Exception e) {
+                        // If wait fails, continue anyway
+                    }
                     
                     Job job = extractJobData(jobElement, page);
-                    sink.accept(job);
-                    System.out.println("[" + getSource() + "] ✅ Scraped job #" + (i + 1) + ": " + job.getTitle() + " at " + job.getCompany());
+                    // Only add job if it has at least a title or company (to avoid empty jobs)
+                    if (job != null && (job.getTitle() != null && !job.getTitle().trim().isEmpty() || 
+                        job.getCompany() != null && !job.getCompany().trim().isEmpty())) {
+                        sink.accept(job);
+                        System.out.println("[" + getSource() + "] ✅ Scraped job #" + (i + 1) + ": " + 
+                            (job.getTitle() != null && !job.getTitle().isEmpty() ? job.getTitle() : "Untitled") + 
+                            " at " + (job.getCompany() != null && !job.getCompany().isEmpty() ? job.getCompany() : "Unknown"));
+                    } else {
+                        System.err.println("[" + getSource() + "] ⚠️  Skipped job #" + (i + 1) + " - no valid data extracted");
+                    }
                 } catch (Exception e) {
                     System.err.println("[" + getSource() + "] ❌ Error scraping job " + (i + 1) + ": " + e.getMessage());
+                    e.printStackTrace(); // Print full stack trace for debugging
                     // Continue with next job even if this one fails
                 }
             }
             
             System.out.println("[" + getSource() + "] ✅ Scraping completed successfully!");
+            
+            // Note: Browser will stay open - the infinite wait is handled in ScraperMain
+            // after all jobs are saved to files
             
         } catch (Exception e) {
             System.err.println("\n[" + getSource() + "] ❌ Error during scraping:");
@@ -90,11 +167,12 @@ public abstract class BaseJobScraper implements JobScraper {
             e.printStackTrace();
             throw e;
         } finally {
-            // Step 12: Cleanup - always close browser and playwright
-            System.out.println("[" + getSource() + "] Closing browser...");
-            browser.close();
-            playwright.close();
-            System.out.println("[" + getSource() + "] Browser closed successfully");
+            // Step 12: Keep browsers open - don't close them automatically
+            // Browsers will stay open so user can view results
+            // They'll be closed when user presses Ctrl+C in ScraperMain
+            // This allows jobs to be saved AND browsers to stay open
+            System.out.println("[" + getSource() + "] 🔓 Browser will stay open (close manually or press Ctrl+C to stop program)");
+            // Note: We don't close browser/playwright here - they stay open for user to view
         }
     }
 

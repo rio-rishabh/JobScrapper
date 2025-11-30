@@ -3,6 +3,8 @@ package com.jobScrapper.test;
 import com.jobScrapper.scraper.ScraperManager;
 import com.jobScrapper.scraper.impl.LinkedInScraper;
 import com.jobScrapper.scraper.impl.IndeedScraper;
+import com.jobScrapper.util.JobStorage;
+import com.jobscrapper.model.Job;
 import com.jobscrapper.model.ScrapingJobRequest;
 import java.util.ArrayList;
 import java.util.List;
@@ -13,6 +15,8 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 /**
  * Generic main class to test job scrapers from multiple platforms.
@@ -31,8 +35,8 @@ public class ScraperMain {
         List<com.jobScrapper.scraper.JobScraper> scrapers = new ArrayList<>();
         scrapers.add(new LinkedInScraper());
         scrapers.add(new IndeedScraper());
+        scrapers.add(new com.jobScrapper.scraper.impl.GlassDoorScraper());
         // Add more scrapers here as you create them:
-        // scrapers.add(new GlassdoorScraper());
         // scrapers.add(new MonsterScraper());
         
         // Step 2: Create ScraperManager with all scrapers
@@ -51,6 +55,7 @@ public class ScraperMain {
         ScrapingJobRequest request = new ScrapingJobRequest()
             .addSourcesItem(ScrapingJobRequest.SourcesEnum.LINKED_IN)  // Scrape from LinkedIn
             .addSourcesItem(ScrapingJobRequest.SourcesEnum.INDEED)     // Scrape from Indeed
+            .addSourcesItem(ScrapingJobRequest.SourcesEnum.GLASSDOOR)  // Scrape from GlassDoor
             // Add more sources as needed:
             // .addSourcesItem(ScrapingJobRequest.SourcesEnum.GLASSDOOR)
             // .addSourcesItem(ScrapingJobRequest.SourcesEnum.MONSTER)
@@ -59,8 +64,10 @@ public class ScraperMain {
             .location("San Francisco, CA")          // Change location or set to null
             .maxResults(5);                        // Limit to 5 jobs per platform for testing
         
-        // Step 5: Track scraped jobs per platform
+        // Step 5: Track scraped jobs per platform and store all jobs
         Map<String, AtomicInteger> jobCountsByPlatform = new HashMap<>();
+        Map<String, List<Job>> jobsByPlatform = new ConcurrentHashMap<>(); // Thread-safe storage
+        JobStorage jobStorage = new JobStorage();
         
         System.out.println("📋 Scraping Configuration:");
         System.out.println("   Platforms: " + request.getSources());
@@ -91,9 +98,11 @@ public class ScraperMain {
                 continue; // Skip this source and continue with next
             }
             
-            // Initialize counter for this platform
+            // Initialize counter and storage for this platform
             jobCountsByPlatform.putIfAbsent(sourceName, new AtomicInteger(0));
+            jobsByPlatform.putIfAbsent(sourceName, new CopyOnWriteArrayList<>());
             AtomicInteger platformJobCount = jobCountsByPlatform.get(sourceName);
+            List<Job> platformJobs = jobsByPlatform.get(sourceName);
             
             // Create final copies for use in lambda
             final int currentPlatformIndex = platformIndex;
@@ -116,6 +125,17 @@ public class ScraperMain {
                     // Use ScraperManager to get and run the appropriate scraper
                     scraperManager.runScraper(finalSourceName, request, job -> {
                         int count = platformJobCount.incrementAndGet();
+                        
+                        // Validate job before storing
+                        if (job == null) {
+                            System.err.println("[" + finalSourceName + "] ⚠️  Received null job, skipping...");
+                            return;
+                        }
+                        
+                        // Store the job for later use (thread-safe list)
+                        synchronized (platformJobs) {
+                            platformJobs.add(job);
+                        }
                         
                         // Use synchronized output to avoid mixed console messages
                         synchronized (System.out) {
@@ -143,6 +163,7 @@ public class ScraperMain {
                     
                     System.out.println("✅ [" + finalSourceName + "] Scraping completed!");
                     System.out.println("📊 [" + finalSourceName + "] Total jobs scraped: " + platformJobCount.get());
+                    System.out.println("📦 [" + finalSourceName + "] Jobs stored in memory: " + platformJobs.size());
                     System.out.println();
                     
                 } catch (Exception e) {
@@ -207,7 +228,134 @@ public class ScraperMain {
         System.out.println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
         System.out.println("✅ All scraping completed!");
         System.out.println("📊 Total jobs scraped across all platforms: " + totalJobs);
-        System.out.println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        
+        // Count actual jobs in storage
+        int actualJobsInStorage = 0;
+        for (List<Job> platformJobList : jobsByPlatform.values()) {
+            actualJobsInStorage += platformJobList.size();
+        }
+        System.out.println("📦 Total jobs in storage: " + actualJobsInStorage);
+        System.out.println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
+        
+        // Step 8: Save all scraped jobs to files
+        if (actualJobsInStorage > 0) {
+            System.out.println("💾 Saving scraped jobs to files...\n");
+            
+            try {
+                // Collect all jobs from all platforms
+                List<Job> allJobs = new ArrayList<>();
+                for (List<Job> platformJobList : jobsByPlatform.values()) {
+                    synchronized (platformJobList) {
+                        allJobs.addAll(platformJobList);
+                    }
+                }
+                
+                if (allJobs.isEmpty()) {
+                    System.out.println("⚠️  No jobs collected to save (all lists were empty).\n");
+                } else {
+                    // Save to both JSON and CSV
+                    String timestamp = java.time.LocalDateTime.now().format(
+                        java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd_HH-mm-ss")
+                    );
+                    String baseFilename = "jobs_" + timestamp;
+                    
+                    String[] savedFiles = jobStorage.saveAll(allJobs, baseFilename);
+                    
+                    if (savedFiles[0] != null && savedFiles[1] != null) {
+                        System.out.println("\n✅ Jobs saved successfully!");
+                        System.out.println("   📄 JSON file: " + savedFiles[0]);
+                        System.out.println("   📊 CSV file:  " + savedFiles[1]);
+                        System.out.println("   📁 Location:  scraped_jobs/ directory\n");
+                    } else {
+                        System.out.println("\n⚠️  Warning: Files were not saved (check errors above).\n");
+                    }
+                    
+                    // Also save per-platform files
+                    System.out.println("💾 Saving per-platform files...");
+                    int platformFilesSaved = 0;
+                    for (Map.Entry<String, List<Job>> entry : jobsByPlatform.entrySet()) {
+                        if (!entry.getValue().isEmpty()) {
+                            String platformFilename = baseFilename + "_" + entry.getKey().toLowerCase();
+                            String[] platformFiles = jobStorage.saveAll(entry.getValue(), platformFilename);
+                            if (platformFiles[0] != null && platformFiles[1] != null) {
+                                platformFilesSaved++;
+                            }
+                        }
+                    }
+                    if (platformFilesSaved > 0) {
+                        System.out.println("✅ Per-platform files saved! (" + platformFilesSaved + " platforms)\n");
+                    } else {
+                        System.out.println("⚠️  No per-platform files were saved.\n");
+                    }
+                }
+                
+            } catch (Exception e) {
+                System.err.println("❌ Error saving jobs to files: " + e.getMessage());
+                e.printStackTrace();
+            }
+            } else {
+                System.out.println("⚠️  No jobs to save (totalJobs = 0, actualJobsInStorage = " + actualJobsInStorage + ").\n");
+        }
+        
+        // Add shutdown hook to save jobs if program is interrupted
+        // Note: jobStorage and jobsByPlatform are effectively final, so they can be used in lambda
+        final JobStorage finalJobStorage = jobStorage; // Make effectively final for lambda
+        final Map<String, List<Job>> finalJobsByPlatform = jobsByPlatform; // Make effectively final
+        
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            System.out.println("\n\n🛑 Shutdown detected! Saving any collected jobs...");
+            try {
+                int jobsToSave = 0;
+                for (List<Job> platformJobList : finalJobsByPlatform.values()) {
+                    synchronized (platformJobList) {
+                        jobsToSave += platformJobList.size();
+                    }
+                }
+                
+                if (jobsToSave > 0) {
+                    List<Job> allJobs = new ArrayList<>();
+                    for (List<Job> platformJobList : finalJobsByPlatform.values()) {
+                        synchronized (platformJobList) {
+                            allJobs.addAll(platformJobList);
+                        }
+                    }
+                    
+                    String timestamp = java.time.LocalDateTime.now().format(
+                        java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd_HH-mm-ss")
+                    );
+                    String baseFilename = "jobs_" + timestamp + "_interrupted";
+                    
+                    String[] savedFiles = finalJobStorage.saveAll(allJobs, baseFilename);
+                    
+                    if (savedFiles != null && savedFiles[0] != null && savedFiles[1] != null) {
+                        System.out.println("✅ Saved " + jobsToSave + " jobs before shutdown!");
+                        System.out.println("   📄 JSON: " + savedFiles[0]);
+                        System.out.println("   📊 CSV:  " + savedFiles[1]);
+                    }
+                } else {
+                    System.out.println("⚠️  No jobs to save.");
+                }
+            } catch (Exception e) {
+                System.err.println("❌ Error saving jobs on shutdown: " + e.getMessage());
+            }
+        }));
+        
+        // Step 9: Keep browsers open indefinitely (after saving is complete)
+        System.out.println("🔓 All browsers will stay open indefinitely...");
+        System.out.println("   Close browser windows manually when you're done.");
+        System.out.println("   Press Ctrl+C in the terminal to stop the program.");
+        System.out.println("   Jobs have been saved to: scraped_jobs/ directory");
+        System.out.println("   💡 Tip: If you interrupt, jobs will be auto-saved!\n");
+        
+        // Wait indefinitely so browsers stay open
+        // This allows you to view results in browsers while files are already saved
+        try {
+            while (true) {
+                Thread.sleep(60000); // Wait 1 minute at a time, but loop forever
+            }
+        } catch (InterruptedException e) {
+            System.out.println("\n⏹️  Program interrupted, shutting down...");
+        }
     }
 }
 
