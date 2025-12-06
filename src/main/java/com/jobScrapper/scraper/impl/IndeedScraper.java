@@ -428,8 +428,39 @@ public class IndeedScraper extends BaseJobScraper {
                 } else {
                     System.out.println("[" + getSource() + "]    ⚠️  Could not find verification checkbox automatically");
                     System.out.println("[" + getSource() + "]    Please complete verification manually in the browser");
-                    System.out.println("[" + getSource() + "]    Waiting 45 seconds for manual verification...");
-                    page.waitForTimeout(45000); // Increased wait time
+                    System.out.println("[" + getSource() + "]    Waiting up to 90 seconds for manual verification...");
+                    
+                    // Wait and check periodically if verification completed
+                    boolean verified = false;
+                    for (int i = 0; i < 90; i++) {
+                        page.waitForTimeout(1000);
+                        try {
+                            String newUrl = page.url();
+                            String newTitle = page.title().toLowerCase();
+                            // Check if we're past the verification page
+                            if (!newUrl.contains("verify") && 
+                                !newUrl.contains("challenge") && 
+                                !newTitle.contains("just a moment") &&
+                                !newTitle.contains("checking your browser") &&
+                                !newTitle.contains("please wait")) {
+                                verified = true;
+                                System.out.println("[" + getSource() + "]    ✅ Verification completed! Continuing...");
+                                System.out.println("[" + getSource() + "]    Current URL: " + newUrl);
+                                System.out.println("[" + getSource() + "]    Current title: " + page.title());
+                                page.waitForTimeout(3000); // Extra wait for page to fully load
+                                break;
+                            }
+                        } catch (Exception e) {
+                            // Continue waiting
+                        }
+                    }
+                    
+                    if (!verified) {
+                        System.out.println("[" + getSource() + "]    ⚠️  Still on verification page after 90 seconds");
+                        System.out.println("[" + getSource() + "]    Current URL: " + page.url());
+                        System.out.println("[" + getSource() + "]    Current title: " + page.title());
+                        System.out.println("[" + getSource() + "]    ⚠️  Will attempt to continue anyway...");
+                    }
                 }
             }
         } catch (Exception e) {

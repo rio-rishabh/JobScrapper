@@ -4,6 +4,8 @@ import com.jobscrapper.model.Job;
 import com.jobscrapper.model.ScrapingJobRequest;
 import com.microsoft.playwright.*;
 import java.util.function.Consumer;
+import java.util.UUID;
+import java.time.OffsetDateTime;
 
 /**
  * Base class for all job scrapers that handles common Playwright infrastructure.
@@ -58,6 +60,22 @@ public abstract class BaseJobScraper implements JobScraper {
             // Step 7: Handle login if needed (site-specific, optional)
             try {
                 handleLoginIfNeeded(page);
+                // After handling login/verification, wait a bit more and check if we're on the right page
+                page.waitForTimeout(2000);
+                String currentTitle = page.title().toLowerCase();
+                String currentUrl = page.url().toLowerCase();
+                
+                // If still on verification/challenge page, log warning
+                if (currentTitle.contains("just a moment") || 
+                    currentTitle.contains("checking your browser") ||
+                    currentTitle.contains("please wait") ||
+                    currentUrl.contains("challenge") ||
+                    currentUrl.contains("verify")) {
+                    System.err.println("[" + getSource() + "] ⚠️  WARNING: Still appears to be on verification page");
+                    System.err.println("[" + getSource() + "]    URL: " + page.url());
+                    System.err.println("[" + getSource() + "]    Title: " + page.title());
+                    System.err.println("[" + getSource() + "]    Job search may fail - please verify manually in browser");
+                }
             } catch (Exception e) {
                 System.err.println("[" + getSource() + "] ⚠️  Error in handleLoginIfNeeded, continuing anyway: " + e.getMessage());
                 // Don't throw - continue with scraping
@@ -137,16 +155,41 @@ public abstract class BaseJobScraper implements JobScraper {
                         // If wait fails, continue anyway
                     }
                     
-                    Job job = extractJobData(jobElement, page);
-                    // Only add job if it has at least a title or company (to avoid empty jobs)
-                    if (job != null && (job.getTitle() != null && !job.getTitle().trim().isEmpty() || 
-                        job.getCompany() != null && !job.getCompany().trim().isEmpty())) {
+                    Job job = null;
+                    try {
+                        job = extractJobData(jobElement, page);
+                    } catch (Exception extractError) {
+                        System.err.println("[" + getSource() + "] ❌ Error in extractJobData for job #" + (i + 1) + ": " + extractError.getMessage());
+                        extractError.printStackTrace();
+                        // Try to create a minimal job object anyway
+                        try {
+                            job = new Job()
+                                .id(UUID.randomUUID().toString())
+                                .source(getSource())
+                                .title("Extraction Failed - Job #" + (i + 1))
+                                .company("Unknown")
+                                .location("Not Specified")
+                                .url(page.url())
+                                .description("Error extracting job data: " + extractError.getMessage())
+                                .postedDate(OffsetDateTime.now());
+                        } catch (Exception e2) {
+                            System.err.println("[" + getSource() + "] ❌ Failed to create fallback job object: " + e2.getMessage());
+                        }
+                    }
+                    
+                    // Accept job if it exists (even if some fields are empty)
+                    if (job != null) {
+                        // Log what we got
+                        String title = job.getTitle() != null ? job.getTitle() : "NO TITLE";
+                        String company = job.getCompany() != null ? job.getCompany() : "NO COMPANY";
+                        System.out.println("[" + getSource() + "] 📝 Extracted job #" + (i + 1) + ": title='" + title + "', company='" + company + "'");
+                        
                         sink.accept(job);
                         System.out.println("[" + getSource() + "] ✅ Scraped job #" + (i + 1) + ": " + 
-                            (job.getTitle() != null && !job.getTitle().isEmpty() ? job.getTitle() : "Untitled") + 
-                            " at " + (job.getCompany() != null && !job.getCompany().isEmpty() ? job.getCompany() : "Unknown"));
+                            (!title.equals("NO TITLE") ? title : "Untitled") + 
+                            " at " + (!company.equals("NO COMPANY") ? company : "Unknown"));
                     } else {
-                        System.err.println("[" + getSource() + "] ⚠️  Skipped job #" + (i + 1) + " - no valid data extracted");
+                        System.err.println("[" + getSource() + "] ⚠️  Skipped job #" + (i + 1) + " - extractJobData returned null");
                     }
                 } catch (Exception e) {
                     System.err.println("[" + getSource() + "] ❌ Error scraping job " + (i + 1) + ": " + e.getMessage());

@@ -21,10 +21,10 @@ public class GlassDoorScraper extends BaseJobScraper{
         // Glassdoor search URL - use the search page and let it handle location filtering
         // We'll navigate to the search page and then interact with the location filter if needed
         // Format: https://www.glassdoor.com/Job/jobs.htm?sc.keyword=...&locT=C&locId=...
-        
+
         StringBuilder url = new StringBuilder("https://www.glassdoor.com/Job/jobs.htm");
         boolean hasParams = false;
-        
+
         // Add keywords
         List<String> keywords = request.getKeywords();
         if(keywords != null && !keywords.isEmpty()){
@@ -61,7 +61,8 @@ public class GlassDoorScraper extends BaseJobScraper{
     protected String getJobListSelector(){
         // Glassdoor uses various selectors - try multiple common ones
         // Based on actual Glassdoor structure: job cards are in ul with class or data attributes
-        return "ul[data-test='jobListing'] > li, li[data-test='job-listing'], article[data-test='jobListing'], div[data-test='jobListing'], ul.jobsList > li, li.react-job-listing, div.jobContainer";
+        // Updated with more modern selectors based on current Glassdoor structure
+        return "ul[data-test='jobListing'] > li, li[data-test='job-listing'], article[data-test='jobListing'], div[data-test='jobListing'], ul.jobsList > li, li.react-job-listing, div.jobContainer, ul[class*='JobsList'] > li, li[class*='JobCard'], div[class*='JobCard'], article[class*='JobCard'], ul[class*='JobsList'] li, li[data-test='jobListing'], div[data-test='job-listing'], article.jobContainer, li.jobContainer, div[class*='jobContainer'], ul[class*='jobListing'] > li";
     }
 
 
