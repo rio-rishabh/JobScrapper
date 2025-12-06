@@ -58,3 +58,10 @@ application-local.yml
 Task
 Task.*
 
+# scraper results - ignore all scraped job files
+scraped_jobs/
+# Also ignore any JSON/CSV files in root that might be scraped jobs
+jobs_*.json
+jobs_*.csv
+*_interrupted.json
+*_interrupted.csv
