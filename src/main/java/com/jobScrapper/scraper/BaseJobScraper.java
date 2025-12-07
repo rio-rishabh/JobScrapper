@@ -24,7 +24,7 @@ public abstract class BaseJobScraper implements JobScraper {
         Playwright playwright = Playwright.create();
         
         // Step 2: Launch browser instance
-        Browser browser = playwright.chromium().launch(new BrowserType.LaunchOptions()
+        Browser browser = playwright.webkit().launch(new BrowserType.LaunchOptions()
             .setHeadless(false)  // Set to true for production
             .setSlowMo(100));   // Reduced from 1000ms to 200ms for faster scraping
         

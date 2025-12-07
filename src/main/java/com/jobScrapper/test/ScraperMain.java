@@ -31,6 +31,18 @@ public class ScraperMain {
     public static void main(String[] args) {
         System.out.println("🚀 Starting Multi-Platform Job Scraper...\n");
         
+        // Parse command-line arguments for maxResults
+        int maxResults = 50; // Default value
+        if (args.length > 0) {
+            try {
+                maxResults = Integer.parseInt(args[0]);
+                System.out.println("📊 Using maxResults from command line: " + maxResults);
+            } catch (NumberFormatException e) {
+                System.err.println("⚠️  Invalid maxResults argument: " + args[0] + ". Using default: " + maxResults);
+            }
+        }
+        System.out.println("💡 Tip: You can specify maxResults as first argument: ./gradlew run --args '100'\n");
+        
         // Step 1: Create all available scrapers
         List<com.jobScrapper.scraper.JobScraper> scrapers = new ArrayList<>();
         scrapers.add(new LinkedInScraper());
@@ -61,8 +73,8 @@ public class ScraperMain {
             // .addSourcesItem(ScrapingJobRequest.SourcesEnum.MONSTER)
             .addKeywordsItem("software engineer")  // Change this to test different keywords
             .addKeywordsItem("java")               // Add more keywords if needed
-            .location("San Francisco, CA")          // Change location or set to null
-            .maxResults(5);                        // Limit to 5 jobs per platform for testing
+            .location("Boston, MA")          // Change location or set to null
+            .maxResults(maxResults);                // Number of jobs to scrape per platform
         
         // Step 5: Track scraped jobs per platform and store all jobs
         Map<String, AtomicInteger> jobCountsByPlatform = new HashMap<>();

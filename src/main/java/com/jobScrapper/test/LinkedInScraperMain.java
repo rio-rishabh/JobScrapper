@@ -25,7 +25,7 @@ public class LinkedInScraperMain {
             .addKeywordsItem("software engineer")  // Change this to test different keywords
             .addKeywordsItem("java")               // Add more keywords if needed
             .location("Boston, MA")          // Change location or set to null
-            .maxResults(5);                        // Limit to 5 jobs for testing
+            .maxResults(50);                       // Number of jobs to scrape (change as needed)
         
         // Track scraped jobs
         AtomicInteger jobCount = new AtomicInteger(0);

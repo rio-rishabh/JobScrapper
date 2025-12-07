@@ -562,12 +562,193 @@ public class IndeedScraper extends BaseJobScraper {
             System.err.println("[" + getSource() + "] Error extracting location: " + e.getMessage());
         }
 
-        // Extract description/snippet
+        // Extract description/snippet - first try from search results
         String description = "No description available";
         try {
-            description = jobElement.locator("div.job-snippet").textContent().trim();
+            Locator snippetLocator = jobElement.locator("div.job-snippet, span.job-snippet, div.summary").first();
+            if (snippetLocator.count() > 0) {
+                String snippetText = snippetLocator.textContent();
+                if (snippetText != null && !snippetText.trim().isEmpty()) {
+                    description = snippetText.trim();
+                    System.out.println("[" + getSource() + "] 📝 Found snippet from search results (" + description.length() + " chars)");
+                }
+            }
         } catch (Exception e) {
-            System.err.println("[" + getSource() + "] Error extracting description: " + e.getMessage());
+            System.err.println("[" + getSource() + "] Error extracting snippet: " + e.getMessage());
+        }
+        
+        // If snippet is short or not found, try to get full description from detail page
+        if (description.equals("No description available") || description.length() < 100) {
+            if (!jobURL.isEmpty()) {
+                try {
+                    System.out.println("[" + getSource() + "] 📄 Navigating to job detail page to extract full description...");
+                    System.out.println("[" + getSource() + "]    URL: " + jobURL);
+                    
+                    // Save current URL to navigate back
+                    String originalUrl = page.url();
+                    
+                    // Navigate to job detail page
+                    page.navigate(jobURL);
+                    page.waitForLoadState();
+                    page.waitForTimeout(5000); // Increased wait for initial load
+                    
+                    // Check page state
+                    String pageTitle = page.title();
+                    String pageUrl = page.url();
+                    System.out.println("[" + getSource() + "]    Page loaded - Title: " + pageTitle);
+                    System.out.println("[" + getSource() + "]    Page loaded - URL: " + pageUrl);
+                    
+                    // Check if login/verification is required
+                    String pageTitleLower = pageTitle.toLowerCase();
+                    String pageUrlLower = pageUrl.toLowerCase();
+                    if (pageTitleLower.contains("sign in") || pageTitleLower.contains("login") || 
+                        pageUrlLower.contains("verify") || pageUrlLower.contains("challenge") ||
+                        pageUrlLower.contains("login") || pageUrlLower.contains("account")) {
+                        System.err.println("[" + getSource() + "] ⚠️  Login/verification required to view job description");
+                        System.err.println("[" + getSource() + "]    Page redirected to: " + pageUrl);
+                        System.err.println("[" + getSource() + "]    Please log in to Indeed in the main browser window");
+                        System.err.println("[" + getSource() + "]    Then descriptions will be available on next run");
+                    } else {
+                        // Wait more for dynamic content to load
+                        page.waitForTimeout(3000);
+                        
+                        // Try multiple selectors for Indeed job description
+                        String[] descriptionSelectors = {
+                            "div#jobDescriptionText",
+                            "div.jobsearch-jobDescriptionText",
+                            "div[class*='jobDescriptionText']",
+                            "div[class*='job-description']",
+                            "div[data-testid='job-description']",
+                            "div#jobDescriptionText div",
+                            "div.jobsearch-jobDescriptionText div",
+                            "div.description",
+                            "div[class*='description']",
+                            "div[class*='jobDescription']",
+                            "div[data-test='jobDescription']",
+                            "section[class*='description']",
+                            "div[role='article']",
+                            "main div[class*='description']"
+                        };
+                        
+                        boolean found = false;
+                        for (String selector : descriptionSelectors) {
+                            try {
+                                System.out.println("[" + getSource() + "]    Trying selector: " + selector);
+                                Locator descLocator = page.locator(selector).first();
+                                int count = descLocator.count();
+                                System.out.println("[" + getSource() + "]    Found " + count + " elements with selector: " + selector);
+                                
+                                if (count > 0) {
+                                    // Wait for element to be visible
+                                    try {
+                                        descLocator.waitFor(new Locator.WaitForOptions().setTimeout(5000));
+                                    } catch (Exception e) {
+                                        System.out.println("[" + getSource() + "]    Wait timeout, continuing anyway");
+                                    }
+                                    
+                                    // Try textContent first
+                                    String descText = descLocator.textContent();
+                                    if (descText != null && !descText.trim().isEmpty() && descText.trim().length() > 50) {
+                                        description = descText.trim();
+                                        System.out.println("[" + getSource() + "] ✅ Found description (" + description.length() + " chars) using selector: " + selector);
+                                        found = true;
+                                        break;
+                                    }
+                                    
+                                    // Fallback to innerHTML if textContent is empty or too short
+                                    if (!found) {
+                                        String innerHtml = descLocator.innerHTML();
+                                        if (innerHtml != null && !innerHtml.trim().isEmpty() && innerHtml.trim().length() > 50) {
+                                            description = innerHtml.replaceAll("<[^>]*>", "").trim(); // Strip HTML tags
+                                            System.out.println("[" + getSource() + "] ✅ Found description (innerHTML) (" + description.length() + " chars) using selector: " + selector);
+                                            found = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                            } catch (Exception e) {
+                                System.out.println("[" + getSource() + "]    Selector failed: " + selector + " - " + e.getMessage());
+                                continue;
+                            }
+                        }
+                        
+                        if (!found) {
+                            System.err.println("[" + getSource() + "] ⚠️  Could not find description with any specific selector");
+                            System.err.println("[" + getSource() + "]    Page title: " + page.title());
+                            System.err.println("[" + getSource() + "]    Page URL: " + page.url());
+                            
+                            // Debug: Try to find any div with "description" in class name
+                            try {
+                                Locator allDivs = page.locator("div[class*='description'], section[class*='description']");
+                                int divCount = allDivs.count();
+                                System.out.println("[" + getSource() + "]    Found " + divCount + " elements with 'description' in class");
+                                
+                                if (divCount > 0) {
+                                    // Try the first one
+                                    String testText = allDivs.first().textContent();
+                                    if (testText != null && testText.length() > 20) {
+                                        description = testText.trim();
+                                        System.out.println("[" + getSource() + "] ⚠️  Found description using generic search (" + description.length() + " chars)");
+                                        found = true;
+                                    }
+                                }
+                            } catch (Exception e) {
+                                System.err.println("[" + getSource() + "]    Error in debug section: " + e.getMessage());
+                            }
+                            
+                            // Last resort: Try to get any text content from the page
+                            if (!found) {
+                                try {
+                                    String pageText = page.locator("body").textContent();
+                                    if (pageText != null && pageText.length() > 100) {
+                                        // Extract a reasonable portion (look for job description keywords)
+                                        int startIdx = pageText.toLowerCase().indexOf("job description");
+                                        if (startIdx == -1) startIdx = pageText.toLowerCase().indexOf("about the job");
+                                        if (startIdx == -1) startIdx = pageText.toLowerCase().indexOf("responsibilities");
+                                        if (startIdx == -1) startIdx = 0;
+                                        
+                                        int endIdx = Math.min(startIdx + 3000, pageText.length());
+                                        description = pageText.substring(startIdx, endIdx).trim();
+                                        System.out.println("[" + getSource() + "] ⚠️  Using page text as fallback (" + description.length() + " chars)");
+                                    }
+                                } catch (Exception e) {
+                                    System.err.println("[" + getSource() + "]    Error extracting page text: " + e.getMessage());
+                                }
+                            }
+                        }
+                        
+                        // Navigate back to search results
+                        System.out.println("[" + getSource() + "]    Navigating back to search results...");
+                        page.navigate(originalUrl);
+                        page.waitForLoadState();
+                        page.waitForTimeout(2000); // Wait for search results to reload
+                    }
+                } catch (Exception e) {
+                    System.err.println("[" + getSource() + "] ❌ Error opening detail page or extracting description: " + e.getMessage());
+                    System.err.println("[" + getSource() + "]    Current URL: " + page.url());
+                    System.err.println("[" + getSource() + "]    Current Title: " + page.title());
+                    e.printStackTrace();
+                    // Fallback to snippet from search results if detail page fails
+                    try {
+                        Locator descriptionElement = jobElement.locator("div.job-snippet, span.job-snippet").first();
+                        if (descriptionElement.count() > 0) {
+                            String descriptionText = descriptionElement.textContent();
+                            if (descriptionText != null) {
+                                description = descriptionText.trim();
+                                System.out.println("[" + getSource() + "] ⚠️  Using snippet from search results as fallback (" + description.length() + " chars)");
+                            }
+                        }
+                    } catch (Exception e2) {
+                        // Keep default "No description available"
+                    }
+                }
+            }
+        }
+        
+        // Final check for description length
+        if (description.length() < 50 && !description.equals("No description available")) {
+            System.out.println("[" + getSource() + "] ⚠️  Description is too short (" + description.length() + " chars), falling back to 'No description available'");
+            description = "No description available";
         }
 
         // Create and return Job object
