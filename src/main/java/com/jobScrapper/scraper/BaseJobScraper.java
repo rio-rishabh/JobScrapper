@@ -88,6 +88,62 @@ public abstract class BaseJobScraper implements JobScraper {
     protected Path getBrowserDataPath() {
         return Paths.get(BROWSER_DATA_DIR, getSource().toLowerCase());
     }
+    
+    /**
+     * Injects cookies into the browser context if available in config.json
+     * This allows cookie-based authentication (much less detectable than username/password)
+     * Called BEFORE creating pages so cookies are available immediately
+     */
+    protected void injectCookiesIfAvailable(BrowserContext context) {
+        try {
+            // Try to load cookie from config.json
+            java.io.File configFile = new java.io.File("config.json");
+            if (!configFile.exists()) {
+                return; // No config file, skip cookie injection
+            }
+            
+            com.google.gson.Gson gson = new com.google.gson.Gson();
+            java.io.FileReader reader = new java.io.FileReader(configFile);
+            java.util.Map<String, String> config = gson.fromJson(reader, 
+                new com.google.gson.reflect.TypeToken<java.util.Map<String, String>>(){}.getType());
+            reader.close();
+            
+            // Check for LinkedIn li_at cookie (most common)
+            String liAtCookie = config.get("LINKEDIN_LI_AT_COOKIE");
+            if (liAtCookie != null && !liAtCookie.isEmpty() && getSource().equals("LinkedIn")) {
+                System.out.println("[" + getSource() + "] 🍪 Found LINKEDIN_LI_AT_COOKIE in config.json");
+                System.out.println("[" + getSource() + "]    Injecting cookie for authentication (no login needed!)");
+                
+                // Create cookie object for LinkedIn using builder pattern
+                // Playwright Java API: Cookie(name, value) constructor
+                com.microsoft.playwright.options.Cookie cookie = new com.microsoft.playwright.options.Cookie(
+                    "li_at",    // name
+                    liAtCookie  // value
+                );
+                
+                // Set cookie properties using setters
+                cookie.setDomain(".linkedin.com");
+                cookie.setPath("/");
+                cookie.setHttpOnly(true);
+                cookie.setSecure(true);
+                cookie.setSameSite(com.microsoft.playwright.options.SameSiteAttribute.NONE);
+                
+                // Add cookie to context
+                context.addCookies(java.util.Arrays.asList(cookie));
+                System.out.println("[" + getSource() + "]    ✅ Cookie injected successfully!");
+                System.out.println("[" + getSource() + "]    🎯 Using cookie authentication (80%+ less detection)");
+                return;
+            }
+            
+            // Could add other cookie types here for other sites
+            // For example: INDEED_COOKIE, GLASSDOOR_COOKIE, etc.
+            
+        } catch (Exception e) {
+            // Silently fail - cookie injection is optional
+            // If it fails, we'll fall back to username/password login
+            System.err.println("[" + getSource() + "] ⚠️  Could not inject cookies: " + e.getMessage());
+        }
+    }
 
     @Override
     public final void scrape(ScrapingJobRequest request, Consumer<Job> sink) throws Exception {
@@ -103,13 +159,22 @@ public abstract class BaseJobScraper implements JobScraper {
         BrowserContext context = null;
         Browser browser = null;
         boolean connectedToExisting = false;
+        boolean usePersistentContext = false;
         
-        System.out.println("[" + getSource() + "] 🌐 Using CHROMIUM browser in INCOGNITO MODE");
-        System.out.println("[" + getSource() + "]    ✨ Fresh session - no cookies, no cache!");
-        System.out.println("[" + getSource() + "]    🔒 Private browsing enabled\n");
+        // Check if this scraper needs persistent context (like LinkedIn)
+        String sourceLower = getSource().toLowerCase();
+        if (sourceLower.equals("linkedin")) {
+            usePersistentContext = true;
+            System.out.println("[" + getSource() + "] 🌐 Using CHROMIUM browser with PERSISTENT PROFILE");
+            System.out.println("[" + getSource() + "]    💾 Profile saved at: " + browserDataPath);
+            System.out.println("[" + getSource() + "]    🔑 Cookies and login will be remembered\n");
+        } else {
+            System.out.println("[" + getSource() + "] 🌐 Using CHROMIUM browser in INCOGNITO MODE");
+            System.out.println("[" + getSource() + "]    ✨ Fresh session - no cookies, no cache!");
+            System.out.println("[" + getSource() + "]    🔒 Private browsing enabled\n");
+        }
         
         // Step 2: Clear any existing browser cache/data for Indeed and Glassdoor
-        String sourceLower = getSource().toLowerCase();
         if (sourceLower.equals("indeed") || sourceLower.equals("glassdoor")) {
             try {
                 if (Files.exists(browserDataPath)) {
@@ -132,31 +197,112 @@ public abstract class BaseJobScraper implements JobScraper {
         }
         
         // Launch Chromium with human-like settings
-        browser = playwright.chromium().launch(
-            new BrowserType.LaunchOptions()
-                .setHeadless(false)
-                .setSlowMo(100)  // Human-like delays
-        );
+        // Try to use real Chrome if available (less detectable than Chromium)
+        BrowserType.LaunchOptions launchOptions = new BrowserType.LaunchOptions()
+            .setHeadless(false)
+            .setSlowMo(100);  // Human-like delays
         
-        // Create a FRESH context (like incognito mode) - no persistent storage
-        // Each run starts completely clean with no cookies or cached data
-        context = browser.newContext(
-            new Browser.NewContextOptions()
-                .setViewportSize(1440, 900)  // Common MacBook screen size
-                .setUserAgent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36")
-                .setLocale("en-US")
-                .setTimezoneId("America/New_York")
-                .setColorScheme(com.microsoft.playwright.options.ColorScheme.LIGHT)
-                .setDeviceScaleFactor(2.0)  // Retina display
-                .setHasTouch(false)
-                .setJavaScriptEnabled(true)
-                .setIgnoreHTTPSErrors(true)
-                // These options ensure truly private/incognito behavior:
-                .setAcceptDownloads(false)
-                .setBypassCSP(false)
-        );
+        // Try to use real Chrome executable (more realistic, less detectable)
+        String chromePath = System.getenv("CHROME_PATH");
+        if (chromePath == null || chromePath.isEmpty()) {
+            // Default Chrome paths on macOS
+            String[] possiblePaths = {
+                "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+                "/Applications/Chromium.app/Contents/MacOS/Chromium"
+            };
+            for (String path : possiblePaths) {
+                java.io.File chromeFile = new java.io.File(path);
+                if (chromeFile.exists()) {
+                    chromePath = path;
+                    System.out.println("[" + getSource() + "] 🔍 Found Chrome at: " + chromePath);
+                    break;
+                }
+            }
+        }
         
-        System.out.println("[" + getSource() + "] ✅ Chromium INCOGNITO browser launched!");
+        if (chromePath != null && !chromePath.isEmpty()) {
+            launchOptions.setExecutablePath(java.nio.file.Paths.get(chromePath));
+            System.out.println("[" + getSource() + "] ✅ Using real Chrome browser (less detectable)");
+        } else {
+            System.out.println("[" + getSource() + "] ⚠️  Using Chromium (Chrome not found, may be more detectable)");
+        }
+        
+        // For persistent context (LinkedIn), we need to set executable path in LaunchPersistentContextOptions
+        // For regular context, we can use the browser launch
+        if (usePersistentContext) {
+            // Use launchPersistentContext for LinkedIn to save cookies
+            System.out.println("[" + getSource() + "] 🔄 Creating persistent browser context with REAL Chrome...");
+            
+            // Create LaunchPersistentContextOptions with Chrome executable
+            BrowserType.LaunchPersistentContextOptions persistentOptions = new BrowserType.LaunchPersistentContextOptions()
+                    .setHeadless(false)
+                    .setSlowMo(100)
+                    .setViewportSize(1440, 900)
+                    .setUserAgent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+            .setLocale("en-US")
+            .setTimezoneId("America/New_York")
+                    .setColorScheme(com.microsoft.playwright.options.ColorScheme.LIGHT)
+                    .setDeviceScaleFactor(2.0)
+                    .setHasTouch(false)
+                    .setJavaScriptEnabled(true)
+                    .setIgnoreHTTPSErrors(true)
+                    .setAcceptDownloads(false);
+            
+            // CRITICAL: Set Chrome executable path for persistent context too!
+            if (chromePath != null && !chromePath.isEmpty()) {
+                persistentOptions.setExecutablePath(java.nio.file.Paths.get(chromePath));
+                System.out.println("[" + getSource() + "] ✅ Using REAL Chrome browser for persistent context (much less detectable!)");
+            } else {
+                System.out.println("[" + getSource() + "] ⚠️  Using Chromium for persistent context (Chrome not found)");
+            }
+            
+            // Add args to make browser behave like a REAL user browser
+            // Without these, LinkedIn detects automation and shows reCAPTCHA
+            persistentOptions.setArgs(java.util.Arrays.asList(
+                        "--disable-blink-features=AutomationControlled",  // Hide automation (MOST IMPORTANT)
+                        "--exclude-switches=enable-automation",            // Remove automation flag
+                        "--disable-dev-shm-usage",                         // Prevent crashes
+                        "--no-sandbox",                                    // Already in Playwright default
+                        "--disable-setuid-sandbox",                        // Better resource loading
+                        "--disable-infobars",                              // Remove automation info banner
+                        "--window-position=0,0",                           // Consistent window
+                        "--ignore-certificate-errors",                     // Handle SSL
+                        "--ignore-certificate-errors-spki-list",           // Handle SSL
+                        "--disable-gpu",                                   // Headless GPU issues
+                        "--no-first-run",                                  // Skip first run
+                        "--no-default-browser-check",                      // Skip browser check
+                        "--disable-background-timer-throttling",           // Better performance
+                        "--disable-backgrounding-occluded-windows",         // Better performance
+                        "--disable-renderer-backgrounding"                 // Better performance
+                    ));
+            
+            // Grant permissions to look like a real user
+            persistentOptions.setPermissions(java.util.Arrays.asList("notifications", "geolocation"));
+            
+            // Create persistent context (this returns a BrowserContext with saved data)
+            context = playwright.chromium().launchPersistentContext(browserDataPath, persistentOptions);
+            System.out.println("[" + getSource() + "] ✅ Persistent browser context created with REAL Chrome!");
+            browser = null; // No separate browser object for persistent context
+        } else {
+            // Create a FRESH context (like incognito mode) - no persistent storage
+            // Each run starts completely clean with no cookies or cached data
+            context = browser.newContext(
+                new Browser.NewContextOptions()
+                    .setViewportSize(1440, 900)  // Common MacBook screen size
+                    .setUserAgent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+            .setLocale("en-US")
+            .setTimezoneId("America/New_York")
+                    .setColorScheme(com.microsoft.playwright.options.ColorScheme.LIGHT)
+                    .setDeviceScaleFactor(2.0)  // Retina display
+                    .setHasTouch(false)
+                    .setJavaScriptEnabled(true)
+                    .setIgnoreHTTPSErrors(true)
+                    // These options ensure truly private/incognito behavior:
+                    .setAcceptDownloads(false)
+                    .setBypassCSP(false)
+            );
+            System.out.println("[" + getSource() + "] ✅ Chromium INCOGNITO browser launched!");
+        }
 
         // Adding Extra headers to replicate real browser behavior
         context.setExtraHTTPHeaders(java.util.Map.of(
@@ -171,22 +317,53 @@ public abstract class BaseJobScraper implements JobScraper {
             "Sec-Fetch-User", "?1"
         ));
         
+        // Step 2.5: Inject cookies if available (for cookie-based authentication)
+        // This is called BEFORE creating the page so cookies are available immediately
+        injectCookiesIfAvailable(context);
+        
         // Step 3: Create a new page in the context
         Page page = context.newPage();
         System.out.println("[" + getSource() + "] 📄 Created new browser tab");
         
+        // Block invalid extension requests to prevent console errors
+        try {
+            page.route("**/chrome-extension/**", route -> route.abort());
+        } catch (Exception e) {
+            // Ignore route errors
+        }
+        try {
+            page.route("**/chrome-error/**", route -> route.abort());
+        } catch (Exception e) {
+            // Ignore route errors
+        }
+        
         // ENHANCED JavaScript injection for Cloudflare bypass
         // SKIP this if connected to existing Chrome (it's already a real browser!)
         if (!connectedToExisting) {
-            page.addInitScript("""
-            // Override webdriver property (MOST IMPORTANT for Cloudflare)
+        page.addInitScript("""
+            // Override webdriver property (MOST IMPORTANT for Cloudflare/LinkedIn)
+            // This is the #1 way sites detect automation
             Object.defineProperty(navigator, 'webdriver', {
-                get: () => undefined,
+                get: () => false,  // Return false instead of undefined
                 configurable: true
             });
             
-            // Delete webdriver property
-            delete navigator.__proto__.webdriver;
+            // Delete webdriver property from prototype
+            try {
+                delete navigator.__proto__.webdriver;
+            } catch(e) {}
+            
+            // Also delete from window
+            try {
+                delete window.navigator.webdriver;
+            } catch(e) {}
+            
+            // Hide the automation banner by removing the flag
+            Object.defineProperty(navigator, 'webdriver', {
+                get: () => false,
+                configurable: true,
+                enumerable: false
+            });
             
             // Override plugins to look like a real browser
             Object.defineProperty(navigator, 'plugins', {
@@ -259,12 +436,13 @@ public abstract class BaseJobScraper implements JobScraper {
                 configurable: true
             });
             
-            // Prevent detection via iframe
-            Object.defineProperty(HTMLIFrameElement.prototype, 'contentWindow', {
-                get: function() {
-                    return null;
-                }
-            });
+            // Prevent detection via iframe (but don't break functionality)
+            // Commented out - this was breaking LinkedIn's GraphQL requests
+            // Object.defineProperty(HTMLIFrameElement.prototype, 'contentWindow', {
+            //     get: function() {
+            //         return null;
+            //     }
+            // });
             
             // Override the toString methods to hide modifications
             const originalToString = Function.prototype.toString;
@@ -278,6 +456,33 @@ public abstract class BaseJobScraper implements JobScraper {
             // Remove Playwright-specific properties
             delete window.__playwright;
             delete window.__pw_manual;
+            
+            // Hide the "Chrome is being controlled by automated test software" banner
+            // This banner appears when automation is detected
+            const style = document.createElement('style');
+            style.textContent = '[id*="automation"], [class*="automation"], [data-automation], [aria-label*="automated"], [aria-label*="controlled"], [class*="controlled"], [id*="controlled"] { display: none !important; visibility: hidden !important; opacity: 0 !important; height: 0 !important; }';
+            document.head.appendChild(style);
+            
+            // Also try to remove the banner via DOM manipulation (more aggressive)
+            setInterval(() => {
+                // Remove automation banners
+                const banners = document.querySelectorAll('[id*="automation"], [class*="automation"], [data-automation], [aria-label*="automated"], [aria-label*="controlled"], [class*="controlled"], [id*="controlled"], [class*="infobar"], [id*="infobar"]');
+                banners.forEach(banner => {
+                    banner.remove();
+                    banner.style.display = 'none';
+                    banner.style.visibility = 'hidden';
+                });
+                
+                // Remove any elements with text about automation
+                const allElements = document.querySelectorAll('*');
+                allElements.forEach(el => {
+                    const text = el.textContent || '';
+                    if (text.includes('automated') || text.includes('controlled by') || text.includes('test software')) {
+                        el.style.display = 'none';
+                        el.style.visibility = 'hidden';
+                    }
+                });
+            }, 500);
         """);
         }  // End of if (!connectedToExisting)
         
@@ -299,26 +504,252 @@ public abstract class BaseJobScraper implements JobScraper {
             }
             
             // Step 6: Wait for page to load with human-like behavior
-            System.out.println("[" + getSource() + "] Waiting for page to load...");
+            // CRITICAL: Wait for ALL resources to load (like linkedin_scraper does)
+            System.out.println("[" + getSource() + "] Waiting for page to fully load (including all resources)...");
             try {
-                humanDelay(page, 3000, 5000);  // Variable wait like a human
-                // Wait for page to be in a ready state
-                page.waitForLoadState();
+                // Wait for network to be idle (all resources loaded) - this is KEY for LinkedIn
+                page.waitForLoadState(com.microsoft.playwright.options.LoadState.NETWORKIDLE, 
+                    new Page.WaitForLoadStateOptions().setTimeout(30000));
+                System.out.println("[" + getSource() + "] ✅ Network idle - all resources loaded");
             } catch (Exception e) {
-                System.err.println("[" + getSource() + "] ⚠️  Load state wait error, continuing: " + e.getMessage());
-                humanDelay(page, 3000, 5000); // Fallback wait
+                System.err.println("[" + getSource() + "] ⚠️  Load state wait error, using fallback: " + e.getMessage());
+                // Fallback: wait for basic load state
+                try {
+                page.waitForLoadState();
+                    System.out.println("[" + getSource() + "] ✅ Basic page load completed");
+                } catch (Exception e2) {
+                    System.err.println("[" + getSource() + "] ⚠️  Even fallback failed, continuing anyway...");
+                }
+            }
+            
+            // Additional wait for DOM to be fully interactive
+            try {
+                page.waitForLoadState(com.microsoft.playwright.options.LoadState.DOMCONTENTLOADED);
+            } catch (Exception e) {
+                // Continue anyway
+            }
+            
+            // Human-like delay after page loads
+            humanDelay(page, 2000, 4000);
+            
+            // Step 6.5: For LinkedIn, force job cards to load with hard reload
+            // This runs REGARDLESS of whether network idle succeeded or not
+            if (getSource().equalsIgnoreCase("LinkedIn")) {
+                try {
+                    // Wait a bit for page to be interactive
+                    page.waitForTimeout(3000);
+                    
+                    // Check current URL - if we're already on jobs search results page
+                    String currentUrl = page.url().toLowerCase();
+                    boolean isOnJobsSearchPage = currentUrl.contains("/jobs/search") || currentUrl.contains("/jobs/collections");
+                    
+                    if (isOnJobsSearchPage) {
+                        // We're already on a jobs search/collection page - DON'T click Jobs icon!
+                        // That would navigate us AWAY from the search results.
+                        // Instead, just do a hard reload to force job cards to render
+                        System.out.println("[" + getSource() + "] ✅ Already on jobs search page: " + page.url());
+                        System.out.println("[" + getSource() + "] 🔄 Performing hard reload to force job cards to load...");
+                        
+                        page.reload(new Page.ReloadOptions().setWaitUntil(com.microsoft.playwright.options.WaitUntilState.DOMCONTENTLOADED));
+                        page.waitForTimeout(3000);
+                        
+                        try {
+                            page.waitForLoadState(com.microsoft.playwright.options.LoadState.NETWORKIDLE,
+                                new Page.WaitForLoadStateOptions().setTimeout(15000));
+                            System.out.println("[" + getSource() + "] ✅ Page reloaded and network idle");
+                        } catch (Exception e) {
+                            System.out.println("[" + getSource() + "] ⚠️  Network idle timeout after reload, continuing...");
+                        }
+                        page.waitForTimeout(3000);
+                        System.out.println("[" + getSource() + "] ✅ Ready to start scraping - job list should be visible");
+                        
+                    } else {
+                        // Not on a jobs search page yet - click Jobs icon and Show all
+                        System.out.println("[" + getSource() + "] 🔄 Not on jobs search page, clicking Jobs icon and 'Show all'...");
+                        
+                        // Step 1: Click the Jobs icon (third icon in navigation - bag/briefcase icon)
+                        String[] jobsIconSelectors = {
+                            "nav a[href*='/jobs']",  // Navigation link to jobs
+                            "header a[href*='/jobs']",  // Header link
+                            ".global-nav__primary-link[href*='/jobs']",  // Global nav primary link
+                            "a.global-nav__primary-link[href*='/jobs']",  // Global nav with href
+                            "nav li:nth-child(3) a",  // Third item in nav (Jobs icon)
+                            "header nav li:nth-child(3) a",  // Third item in header nav
+                            ".global-nav__primary-items li:nth-child(3) a",  // Third item in global nav
+                            "a[aria-label*='Jobs']",  // Aria label with Jobs
+                            "a[data-tracking-control-name='nav_jobs']",  // Tracking control name
+                            "a[href='/jobs/']",  // Direct jobs link
+                            "a[href*='linkedin.com/jobs']"  // Any jobs link
+                        };
+                        
+                        boolean clickedJobsIcon = false;
+                        for (String selector : jobsIconSelectors) {
+                            try {
+                                Locator jobsIcon = page.locator(selector).first();
+                                if (jobsIcon.isVisible(new Locator.IsVisibleOptions().setTimeout(3000.0))) {
+                                    System.out.println("[" + getSource() + "]    Found Jobs icon with selector: " + selector);
+                                    jobsIcon.click(new Locator.ClickOptions().setTimeout(5000.0));
+                                    System.out.println("[" + getSource() + "]    ✅ Clicked Jobs icon!");
+                                    clickedJobsIcon = true;
+                                    
+                                    // Wait for navigation
+                                    page.waitForTimeout(3000);
+                                    break;
+                                }
+                            } catch (Exception e) {
+                                // Try next selector
+                                continue;
+                            }
+                        }
+                        
+                        if (clickedJobsIcon) {
+                            // Wait a bit after clicking Jobs icon for page to navigate
+                            page.waitForTimeout(3000);
+                        
+                        // Step 2: Click "Show all" button/link to reveal full job list
+                        System.out.println("[" + getSource() + "]    🔄 Looking for 'Show all' button to list all jobs...");
+                        page.waitForTimeout(2000);
+                        
+                        String[] showAllSelectors = {
+                            "button:has-text('Show all')",
+                            "a:has-text('Show all')",
+                            "span:has-text('Show all')",
+                            ".artdeco-button:has-text('Show all')",
+                            "button[aria-label*='Show all']",
+                            "a[aria-label*='Show all']",
+                            ".jobs-search-results__show-all",
+                            "button.show-all-jobs"
+                        };
+                        
+                        boolean clickedShowAll = false;
+                        String showAllSelectorUsed = null;
+                        for (String selector : showAllSelectors) {
+                            try {
+                                Locator showAllButton = page.locator(selector).first();
+                                if (showAllButton.isVisible(new Locator.IsVisibleOptions().setTimeout(3000.0))) {
+                                    System.out.println("[" + getSource() + "]    Found 'Show all' with selector: " + selector);
+                                    showAllButton.click(new Locator.ClickOptions().setTimeout(5000.0));
+                                    System.out.println("[" + getSource() + "]    ✅ Clicked 'Show all'!");
+                                    clickedShowAll = true;
+                                    showAllSelectorUsed = selector;
+                                    page.waitForTimeout(3000);
+                                    break;
+                                }
+                            } catch (Exception e) {
+                                // Try next selector
+                                continue;
+                            }
+                        }
+                        
+                        if (clickedShowAll) {
+                            // CRITICAL FIX: Hard reload the page after clicking Show all
+                            // User discovered that Cmd+Shift+R (hard reload) + clicking Show all again loads all jobs
+                            System.out.println("[" + getSource() + "]    🔄 Performing hard reload to force job cards to load...");
+                            page.reload(new Page.ReloadOptions().setWaitUntil(com.microsoft.playwright.options.WaitUntilState.DOMCONTENTLOADED));
+                            page.waitForTimeout(3000);
+                            
+                            // Wait for page to be interactive
+                            try {
+                                page.waitForLoadState(com.microsoft.playwright.options.LoadState.NETWORKIDLE,
+                                    new Page.WaitForLoadStateOptions().setTimeout(15000));
+                            } catch (Exception e) {
+                                System.out.println("[" + getSource() + "]    ⚠️  Network idle timeout after reload, continuing...");
+                            }
+                            page.waitForTimeout(2000);
+                            
+                            // Click 'Show all' again after reload - this is what makes jobs load!
+                            System.out.println("[" + getSource() + "]    🔄 Clicking 'Show all' again after reload...");
+                            for (String selector : showAllSelectors) {
+                                try {
+                                    Locator showAllButton = page.locator(selector).first();
+                                    if (showAllButton.isVisible(new Locator.IsVisibleOptions().setTimeout(3000.0))) {
+                                        showAllButton.click(new Locator.ClickOptions().setTimeout(5000.0));
+                                        System.out.println("[" + getSource() + "]    ✅ Clicked 'Show all' again after reload!");
+                                        break;
+                                    }
+                                } catch (Exception e) {
+                                    continue;
+                                }
+                            }
+                            
+                            // Wait for jobs to load after second click
+                            System.out.println("[" + getSource() + "]    ⏳ Waiting for full job list to load...");
+                            page.waitForTimeout(5000);
+                            try {
+                                page.waitForLoadState(com.microsoft.playwright.options.LoadState.NETWORKIDLE,
+                                    new Page.WaitForLoadStateOptions().setTimeout(20000));
+                                System.out.println("[" + getSource() + "]    ✅ Jobs list loaded!");
+                            } catch (Exception e) {
+                                System.out.println("[" + getSource() + "]    ⚠️  Network idle timeout, but continuing...");
+                                page.waitForTimeout(5000);
+                            }
+                            System.out.println("[" + getSource() + "]    ✅ Ready to start scraping - full job list should be visible");
+                        }
+                        
+                        if (!clickedShowAll) {
+                            System.out.println("[" + getSource() + "]    ⚠️  Could not find 'Show all' button - jobs may already be listed");
+                            // Even if Show all not found, wait a bit for jobs to be visible
+                            page.waitForTimeout(3000);
+                        }
+                    } else {
+                        // If Jobs icon not found, try clicking Jobs link in navigation
+                        System.out.println("[" + getSource() + "]    🔄 Jobs icon not found, trying Jobs link in navigation...");
+                        String[] jobsLinkSelectors = {
+                            "a[href*='/jobs']:has-text('Jobs')",
+                            "a:has-text('Jobs')",
+                            "nav a:has-text('Jobs')"
+                        };
+                        
+                        for (String selector : jobsLinkSelectors) {
+                            try {
+                                Locator jobsLink = page.locator(selector).first();
+                                if (jobsLink.isVisible(new Locator.IsVisibleOptions().setTimeout(3000.0))) {
+                                    System.out.println("[" + getSource() + "]    Found Jobs link with selector: " + selector);
+                                    jobsLink.click(new Locator.ClickOptions().setTimeout(5000.0));
+                                    System.out.println("[" + getSource() + "]    ✅ Clicked Jobs link!");
+                                    page.waitForTimeout(3000);
+                                    break;
+                                }
+                            } catch (Exception e) {
+                                continue;
+                            }
+                        }
+                    }
+                    } // End of else (not on jobs search page)
+                } catch (Exception e) {
+                    System.out.println("[" + getSource() + "]    ⚠️  Error in Jobs icon/Show all flow: " + e.getMessage() + " - continuing anyway");
+                }
             }
             
             // Step 7: Handle login if needed (site-specific, optional)
+            System.out.println("[" + getSource() + "] ========================================");
+            System.out.println("[" + getSource() + "] STEP 7: ABOUT TO CALL handleLoginIfNeeded()");
+            System.out.println("[" + getSource() + "] ========================================");
             try {
                 handleLoginIfNeeded(page);
                 
-                // After handling login/verification, wait longer and verify we're past Cloudflare
-                page.waitForTimeout(5000);
+                // For LinkedIn, if we're already on jobs search results page, skip verification wait
+                boolean skipVerificationCheck = false;
+                if (getSource().equalsIgnoreCase("LinkedIn")) {
+                    String currentUrl = page.url().toLowerCase();
+                    if (currentUrl.contains("/jobs/search") || currentUrl.contains("/jobs/search-results")) {
+                        System.out.println("[" + getSource() + "] ✅ Already on jobs list page - skipping verification check");
+                        skipVerificationCheck = true;
+                    }
+                }
                 
-                // Check multiple times if we're still on verification page
+                // After handling login/verification, wait longer and verify we're past Cloudflare
+                // But skip if we're already on LinkedIn jobs page (no CAPTCHA expected)
+                if (!skipVerificationCheck) {
+                page.waitForTimeout(5000);
+                } else {
+                    page.waitForTimeout(2000); // Shorter wait for LinkedIn jobs page
+                }
+                
+                // Check multiple times if we're still on verification page (skip for LinkedIn jobs page)
                 boolean stillOnVerification = false;
-                for (int check = 0; check < 15; check++) {
+                int maxChecks = skipVerificationCheck ? 1 : 15; // Only check once for LinkedIn jobs page
+                for (int check = 0; check < maxChecks; check++) {
                     String currentTitle = page.title().toLowerCase();
                     String currentUrl = page.url().toLowerCase();
                     String pageContent = "";
@@ -328,7 +759,7 @@ public abstract class BaseJobScraper implements JobScraper {
                         // Continue
                     }
                     
-                    // Comprehensive Cloudflare detection
+                    // Comprehensive Cloudflare and reCAPTCHA detection
                     stillOnVerification = 
                         currentTitle.contains("just a moment") || 
                         currentTitle.contains("checking your browser") ||
@@ -342,16 +773,22 @@ public abstract class BaseJobScraper implements JobScraper {
                         pageContent.contains("verify you are human") ||
                         pageContent.contains("cloudflare") ||
                         pageContent.contains("ray id") ||
+                        pageContent.contains("recaptcha") ||
+                        pageContent.contains("could not connect to the recaptcha service") ||
+                        pageContent.contains("check your internet connection") ||
                         page.locator("text=/Additional Verification Required/i").count() > 0 ||
                         page.locator("text=/Help Us Protect/i").count() > 0 ||
-                        page.locator("text=/Please unblock challenges.cloudflare.com/i").count() > 0;
+                        page.locator("text=/Please unblock challenges.cloudflare.com/i").count() > 0 ||
+                        page.locator("text=/reCAPTCHA/i").count() > 0 ||
+                        page.locator("iframe[src*='recaptcha']").count() > 0 ||
+                        page.locator(".g-recaptcha").count() > 0;
                     
-                    if (stillOnVerification) {
+                    if (stillOnVerification && !skipVerificationCheck) {
                         if (check == 0) {
-                            System.err.println("\n[" + getSource() + "] ⚠️  ⚠️  CLOUDFLARE VERIFICATION DETECTED ⚠️  ⚠️");
+                        System.err.println("\n[" + getSource() + "] ⚠️  ⚠️  VERIFICATION DETECTED (Cloudflare/reCAPTCHA) ⚠️  ⚠️");
                             System.err.println("[" + getSource() + "]    URL: " + page.url());
                             System.err.println("[" + getSource() + "]    Title: " + page.title());
-                            System.err.println("[" + getSource() + "]    Please complete the Cloudflare challenge manually in the browser window!");
+                        System.err.println("[" + getSource() + "]    Please complete the verification challenge manually in the browser window!");
                             System.err.println("[" + getSource() + "]    Waiting up to 90 seconds for you to complete verification...\n");
                         }
                         
@@ -359,15 +796,20 @@ public abstract class BaseJobScraper implements JobScraper {
                             System.out.println("[" + getSource() + "]    Still waiting... (" + (90 - check * 3) + " seconds remaining)");
                         }
                         
+                        // Skip wait if we're on LinkedIn jobs page (no CAPTCHA expected)
+                        if (!skipVerificationCheck) {
                         page.waitForTimeout(3000); // Wait 3 seconds between checks
+                        } else {
+                            break; // Skip wait for LinkedIn jobs page
+                        }
                     } else {
                         System.out.println("[" + getSource() + "] ✅ Passed Cloudflare verification page!");
                         break;
                     }
                 }
                 
-                if (stillOnVerification) {
-                    System.err.println("\n[" + getSource() + "] ⚠️  WARNING: Still on Cloudflare verification page after 90 seconds!");
+                if (stillOnVerification && !skipVerificationCheck) {
+                    System.err.println("\n[" + getSource() + "] ⚠️  WARNING: Still on verification page (Cloudflare/reCAPTCHA) after 90 seconds!");
                     System.err.println("[" + getSource() + "]    The scraper will attempt to continue, but may fail to find job listings.");
                     System.err.println("[" + getSource() + "]    Please complete verification in the browser and restart the scraper.\n");
                 }
@@ -381,16 +823,33 @@ public abstract class BaseJobScraper implements JobScraper {
             String jobListSelector = getJobListSelector();
             System.out.println("[" + getSource() + "] Using selector: " + jobListSelector);
             
-            // Final check: Make sure we're not still on Cloudflare page
+            // Final check: Make sure we're not still on Cloudflare/reCAPTCHA page
+            // But skip for LinkedIn if we're already on jobs list page
+            boolean skipFinalVerificationCheck = false;
+            if (getSource().equalsIgnoreCase("LinkedIn")) {
+                String currentUrl = page.url().toLowerCase();
+                if (currentUrl.contains("/jobs/search") || currentUrl.contains("/jobs/search-results")) {
+                    skipFinalVerificationCheck = true;
+                    System.out.println("[" + getSource() + "] ✅ Skipping final verification check - already on jobs list page");
+                }
+            }
+            
+            if (!skipFinalVerificationCheck) {
             String finalCheckTitle = page.title().toLowerCase();
             String finalCheckUrl = page.url().toLowerCase();
+                String finalCheckContent = page.content().toLowerCase();
             if (finalCheckTitle.contains("just a moment") || 
                 finalCheckTitle.contains("verification required") ||
                 finalCheckUrl.contains("challenge") ||
-                page.locator("text=/Additional Verification Required/i").count() > 0) {
-                System.err.println("[" + getSource() + "] ⚠️  Still on Cloudflare page! Waiting 30 more seconds...");
+                    finalCheckContent.contains("recaptcha") ||
+                    finalCheckContent.contains("could not connect to the recaptcha service") ||
+                    page.locator("text=/Additional Verification Required/i").count() > 0 ||
+                    page.locator("text=/reCAPTCHA/i").count() > 0 ||
+                    page.locator("iframe[src*='recaptcha']").count() > 0) {
+                    System.err.println("[" + getSource() + "] ⚠️  Still on verification page (Cloudflare/reCAPTCHA)! Waiting 30 more seconds...");
                 System.err.println("[" + getSource() + "]    Please complete verification in the browser window!");
                 page.waitForTimeout(30000);
+                }
             }
             
             // Try multiple selectors if the main one fails (for sites like Indeed that use comma-separated selectors)
@@ -419,16 +878,156 @@ public abstract class BaseJobScraper implements JobScraper {
                     selector = selector.trim();
                     try {
                         System.out.println("[" + getSource() + "] Trying selector: " + selector);
-                        // Increase timeout to 60 seconds
+                        // For LinkedIn, wait longer and check if elements exist (even if not immediately visible)
+                        if (getSource().equalsIgnoreCase("LinkedIn")) {
+                            // Wait a bit for dynamic content to load
+                            page.waitForTimeout(3000);
+                            // Check if selector finds any elements (don't wait for visibility, just existence)
+                            int count = page.locator(selector).count();
+                            if (count > 0) {
+                                System.out.println("[" + getSource() + "] ✅ Found " + count + " job listings with selector: " + selector);
+                                found = true;
+                                workingSelector = selector; // Use the selector that worked
+                                break;
+                            } else {
+                                System.out.println("[" + getSource() + "] ⚠️  Selector found 0 elements: " + selector);
+                            }
+                        } else {
+                            // For other sites, use the original approach
                         page.waitForSelector(selector, new Page.WaitForSelectorOptions().setTimeout(60000));
                         System.out.println("[" + getSource() + "] ✅ Found job listings with selector: " + selector);
                         found = true;
                         workingSelector = selector; // Use the selector that worked
                         break;
+                        }
                     } catch (Exception e) {
                         lastException = e;
                         System.out.println("[" + getSource() + "] ⚠️  Selector failed: " + selector);
                         // Try next selector
+                    }
+                }
+            }
+            
+            if (!found) {
+                // For LinkedIn, try a more aggressive fallback: look for any clickable elements that might be job cards
+                if (getSource().equalsIgnoreCase("LinkedIn")) {
+                    System.out.println("[" + getSource() + "] 🔄 All standard selectors failed, trying fallback approach...");
+                    page.waitForTimeout(5000); // Wait longer for content
+                    
+                    // CRITICAL FIX: For LinkedIn, FIRST search for job card content elements directly
+                    // Then get their parent containers. This is more reliable than searching for containers.
+                    if (getSource().equalsIgnoreCase("LinkedIn")) {
+                        System.out.println("[" + getSource() + "] 🔍 LinkedIn: Searching for job card content elements first...");
+                        String[] contentSelectors = {
+                            "h3.base-search-card__title",  // PROVEN: Job card title
+                            "a.base-card__full-link[href*='/jobs/view/']",  // PROVEN: Job card link
+                            "a[href*='/jobs/view/']"  // Any job view link
+                        };
+                        
+                        for (String contentSelector : contentSelectors) {
+                            try {
+                                Locator contentElements = page.locator(contentSelector);
+                                int contentCount = contentElements.count();
+                                if (contentCount > 0) {
+                                    System.out.println("[" + getSource() + "] ✅ Found " + contentCount + " job card content elements with: " + contentSelector);
+                                    
+                                    // Get parent containers for each content element
+                                    // Use XPath to get closest li ancestor
+                                    java.util.List<String> parentXPaths = new java.util.ArrayList<>();
+                                    for (int i = 0; i < Math.min(contentCount, 50); i++) {
+                                        try {
+                                            Locator contentEl = contentElements.nth(i);
+                                            // Get the closest li ancestor using XPath
+                                            String xpath = "xpath=//" + contentSelector.replace("h3.", "").replace("a.", "").replace("[href*='/jobs/view/']", "") + "/ancestor::li[1]";
+                                            // Actually, let's use a simpler approach: get parent li directly
+                                            Locator parentLi = contentEl.locator("xpath=ancestor::li[1]");
+                                            if (parentLi.count() > 0) {
+                                                // Check if this parent has job card structure
+                                                Locator titleCheck = parentLi.locator("h3.base-search-card__title, a.base-card__full-link");
+                                                if (titleCheck.count() > 0) {
+                                                    parentXPaths.add("xpath=(//" + contentSelector + ")[" + (i+1) + "]/ancestor::li[1]");
+                                                }
+                                            }
+                                        } catch (Exception e) {
+                                            continue;
+                                        }
+                                    }
+                                    
+                                    if (parentXPaths.size() > 0) {
+                                        System.out.println("[" + getSource() + "]    ✅ Found " + parentXPaths.size() + " parent containers with job card structure");
+                                        // Use the first parent XPath as the selector (we'll handle multiple in extraction)
+                                        workingSelector = parentXPaths.get(0);
+                                        found = true;
+                                        break;
+                                    } else {
+                                        // If we can't get parents, use content elements directly
+                                        System.out.println("[" + getSource() + "]    ⚠️  Could not get parent containers, using content elements directly");
+                                        workingSelector = contentSelector;
+                                        found = true;
+                                        break;
+                                    }
+                                }
+                            } catch (Exception e) {
+                                continue;
+                            }
+                        }
+                    }
+                    
+                    // If LinkedIn content search didn't work, try container selectors
+                    if (!found) {
+                        String[] fallbackSelectors = {
+                            "li.base-card",  // PROVEN: Base card class used by successful scrapers
+                            "li.job-card-container",  // Job card container
+                            ".jobs-search-results__list-item",  // Jobs search results item
+                            "ul[class*='list'] > li",  // Any ul with 'list' in class containing li
+                            "ul[class*='scaffold'] li",  // Generic scaffold list items
+                            "ul > li",  // Very generic: any li in a ul (will filter during extraction)
+                            "div[class*='scaffold'] > div",  // Scaffold divs
+                            "ul li[class*='job']",  // List items with 'job' in class
+                            "div[class*='job']"  // Divs with 'job' in class
+                        };
+                    
+                    for (String fallbackSelector : fallbackSelectors) {
+                        try {
+                            int count = page.locator(fallbackSelector).count();
+                            // For link-based selectors, we need multiple links (left panel), not just one (right panel)
+                            if (count > 0 && (count > 1 || !fallbackSelector.contains("href"))) {
+                                System.out.println("[" + getSource() + "] ✅ Fallback selector found " + count + " elements: " + fallbackSelector);
+                                found = true;
+                                workingSelector = fallbackSelector;
+                                break;
+                            } else if (count == 1 && fallbackSelector.contains("href")) {
+                                System.out.println("[" + getSource() + "] ⚠️  Fallback selector found only 1 link (likely right panel), skipping: " + fallbackSelector);
+                            }
+                        } catch (Exception e) {
+                            continue;
+                        }
+                        }
+                    }
+                    
+                    // If still not found, try to find clickable job cards by looking for elements with job-related attributes
+                    if (!found) {
+                        System.out.println("[" + getSource() + "] 🔄 Trying attribute-based selectors...");
+                        String[] attrSelectors = {
+                            "[data-job-id]",
+                            "[data-entity-urn*='job']",
+                            "[data-occludable-job-id]",
+                            "li[data-test-id*='job']",
+                            "div[data-test-id*='job']"
+                        };
+                        
+                        for (String attrSelector : attrSelectors) {
+                            try {
+                                int count = page.locator(attrSelector).count();
+                                if (count > 0) {
+                                    System.out.println("[" + getSource() + "] ✅ Attribute selector found " + count + " elements: " + attrSelector);
+                                    found = true;
+                                    workingSelector = attrSelector;
+                                    break;
+                                }
+                            } catch (Exception e) {
+                                continue;
+                            }
                     }
                 }
             }
@@ -446,9 +1045,19 @@ public abstract class BaseJobScraper implements JobScraper {
                     System.err.println("[" + getSource() + "]    ⚠️  CLOUDFLARE IS BLOCKING ACCESS!");
                     System.err.println("[" + getSource() + "]    Please complete the Cloudflare challenge in the browser window");
                     System.err.println("[" + getSource() + "]    Then restart the scraper\n");
+                    } else {
+                        // Dump page HTML for debugging
+                        System.err.println("[" + getSource() + "] 🔍 DEBUG: Checking for specific elements:");
+                        System.err.println("[" + getSource() + "]    - 'ul' elements: " + page.locator("ul").count());
+                        System.err.println("[" + getSource() + "]    - 'li' elements: " + page.locator("li").count());
+                        System.err.println("[" + getSource() + "]    - 'article' elements: " + page.locator("article").count());
+                        System.err.println("[" + getSource() + "]    - elements with 'job' in class: " + page.locator("[class*='job']").count());
+                        System.err.println("[" + getSource() + "]    - elements with 'scaffold' in class: " + page.locator("[class*='scaffold']").count());
+                        System.err.println("[" + getSource() + "]    - links with '/jobs/view/': " + page.locator("a[href*='/jobs/view/']").count());
                 }
                 
                 throw new Exception("Failed to find job listings. Cloudflare verification may be required.", lastException);
+                }
             }
             
             // Step 8.5: SCROLL TO LOAD MORE JOBS
@@ -458,18 +1067,153 @@ public abstract class BaseJobScraper implements JobScraper {
                 scrollToLoadMore(page, scrollsNeeded, 1500);
             }
             
+            // Step 8.6: Wait for ALL resources to fully load (like linkedin_scraper does)
+            System.out.println("[" + getSource() + "] ⏳ Waiting for all jobs and resources to fully load...");
+            try {
+                // Wait for network to be idle - ensures all dynamic content is loaded
+                page.waitForLoadState(com.microsoft.playwright.options.LoadState.NETWORKIDLE, 
+                    new Page.WaitForLoadStateOptions().setTimeout(20000));
+                System.out.println("[" + getSource() + "] ✅ Network idle - all resources loaded");
+            } catch (Exception e) {
+                System.out.println("[" + getSource() + "] ⚠️  Network idle timeout, using fallback wait");
+                humanDelay(page, 5000, 7000);
+            }
+            
+            // Additional wait for dynamic content (especially LinkedIn's React components)
+            humanDelay(page, 2000, 4000);
+            
             // Step 9: Find all job elements (use the selector that worked)
+            // Wait a moment and then count jobs (LinkedIn loads dynamically)
+            page.waitForTimeout(2000);
             Locator jobElements = page.locator(workingSelector);
             int jobCount = jobElements.count();
-            System.out.println("[" + getSource() + "] Found " + jobCount + " job listings using selector: " + workingSelector);
+            System.out.println("[" + getSource() + "] ✅ Found " + jobCount + " job listings using selector: " + workingSelector);
             
-            // If we only found 1-2 jobs, try scrolling more
-            if (jobCount < 5) {
-                System.out.println("[" + getSource() + "] ⚠️  Only found " + jobCount + " jobs, trying additional scrolling...");
-                scrollToLoadMore(page, 5, 2000);  // More aggressive scrolling
+            // SPECIAL HANDLING FOR LINKEDIN: If we found job card content elements (h3.base-search-card__title, etc.)
+            // instead of containers, we need to get their parent containers
+            if (getSource().equalsIgnoreCase("LinkedIn") && 
+                (workingSelector.contains("base-search-card__title") || 
+                 workingSelector.contains("base-card__full-link") ||
+                 workingSelector.contains("/jobs/view/"))) {
+                System.out.println("[" + getSource() + "] 🔄 Found job card content elements, getting parent containers...");
+                try {
+                    // Get all job card content elements
+                    Locator contentElements = page.locator(workingSelector);
+                    int contentCount = contentElements.count();
+                    System.out.println("[" + getSource() + "]    Found " + contentCount + " job card content elements");
+                    
+                    // Try to get parent containers - use XPath to get closest li ancestor
+                    // For each content element, get its closest li parent
+                    java.util.List<Locator> parentContainers = new java.util.ArrayList<>();
+                    for (int i = 0; i < Math.min(contentCount, 100); i++) { // Limit to 100 for performance
+                        try {
+                            Locator contentElement = contentElements.nth(i);
+                            // Get the closest li ancestor
+                            Locator parentLi = contentElement.locator("xpath=ancestor::li[1]");
+                            if (parentLi.count() > 0) {
+                                parentContainers.add(parentLi.first());
+                            }
+                        } catch (Exception e) {
+                            continue;
+                        }
+                    }
+                    
+                    if (parentContainers.size() > 0) {
+                        System.out.println("[" + getSource() + "]    ✅ Found " + parentContainers.size() + " parent containers");
+                        // Create a combined locator from all parent containers
+                        // We'll need to process them individually in the extraction loop
+                        jobCount = parentContainers.size();
+                        workingSelector = "LINKEDIN_PARENT_CONTAINERS"; // Special marker
+                        System.out.println("[" + getSource() + "]    Using parent containers for extraction");
+                    }
+                } catch (Exception e) {
+                    System.err.println("[" + getSource() + "]    ⚠️  Error getting parent containers: " + e.getMessage());
+                }
+            }
+            
+            // DEBUG: If jobs found but count is 0, try alternative selectors
+            if (jobCount == 0) {
+                System.err.println("[" + getSource() + "] ⚠️  WARNING: Selector found elements but count is 0!");
+                System.err.println("[" + getSource() + "]    Trying to debug...");
+                
+                    // Try to see what's actually on the page
+                    try {
+                        int articleCount = page.locator("article").count();
+                        int liCount = page.locator("li").count();
+                        int divWithJobId = page.locator("div[data-job-id]").count();
+                        int divWithEntityUrn = page.locator("div[data-entity-urn*='jobPosting']").count();
+                        
+                        // Check for job card content elements (proven selectors)
+                        int jobTitles = page.locator("h3.base-search-card__title").count();
+                        int jobLinks = page.locator("a.base-card__full-link[href*='/jobs/view/']").count();
+                        int anyJobLinks = page.locator("a[href*='/jobs/view/']").count();
+                        
+                        System.err.println("[" + getSource() + "]    DEBUG: article elements: " + articleCount);
+                        System.err.println("[" + getSource() + "]    DEBUG: li elements: " + liCount);
+                        System.err.println("[" + getSource() + "]    DEBUG: div[data-job-id]: " + divWithJobId);
+                        System.err.println("[" + getSource() + "]    DEBUG: div[data-entity-urn*='jobPosting']: " + divWithEntityUrn);
+                        System.err.println("[" + getSource() + "]    DEBUG: h3.base-search-card__title: " + jobTitles);
+                        System.err.println("[" + getSource() + "]    DEBUG: a.base-card__full-link[href*='/jobs/view/']: " + jobLinks);
+                        System.err.println("[" + getSource() + "]    DEBUG: a[href*='/jobs/view/']: " + anyJobLinks);
+                        
+                        // If we found job card content elements, use them!
+                        if (jobTitles > 0 || jobLinks > 0) {
+                            String contentSelector = jobTitles > 0 ? "h3.base-search-card__title" : "a.base-card__full-link[href*='/jobs/view/']";
+                            System.err.println("[" + getSource() + "]    ✅ Found job card content! Using: " + contentSelector);
+                            workingSelector = contentSelector;
+                            jobElements = page.locator(workingSelector);
+                            jobCount = jobElements.count();
+                            System.out.println("[" + getSource() + "] ✅ Using job card content selector: " + workingSelector + " (found " + jobCount + " elements)");
+                        }
+                    
+                    // Try alternative selectors
+                    String[] altSelectors = {
+                        "article",
+                        "li[data-occludable-job-id]",
+                        "div[data-entity-urn*='jobPosting']",
+                        ".scaffold-layout__list-item"
+                    };
+                    
+                    for (String altSelector : altSelectors) {
+                        try {
+                            int altCount = page.locator(altSelector).count();
+                            if (altCount > 0) {
+                                System.err.println("[" + getSource() + "]    ✅ Alternative selector '" + altSelector + "' found " + altCount + " elements!");
+                                workingSelector = altSelector;
+                                jobElements = page.locator(workingSelector);
+                                jobCount = altCount;
+                                System.out.println("[" + getSource() + "] ✅ Using alternative selector: " + workingSelector);
+                                break;
+                            }
+                        } catch (Exception e) {
+                            // Continue
+                        }
+                    }
+                } catch (Exception e) {
+                    System.err.println("[" + getSource() + "]    Error in debug: " + e.getMessage());
+                }
+            }
+            
+            // If we found fewer jobs than requested, try scrolling more aggressively
+            int maxRequested = request.getMaxResults() != null ? request.getMaxResults() : 50;
+            
+            if (jobCount < maxRequested && jobCount < 20) {
+                System.out.println("[" + getSource() + "] ⚠️  Only found " + jobCount + " jobs (requested " + maxRequested + "), trying additional scrolling...");
+                scrollToLoadMore(page, 10, 2000);  // More aggressive scrolling
+                page.waitForTimeout(3000); // Wait for jobs to load
                 jobElements = page.locator(workingSelector);
                 jobCount = jobElements.count();
                 System.out.println("[" + getSource() + "] After additional scrolling: Found " + jobCount + " job listings");
+                
+                // If still not enough, try one more time
+                if (jobCount < maxRequested / 2) {
+                    System.out.println("[" + getSource() + "] ⚠️  Still only " + jobCount + " jobs, trying final scroll burst...");
+                    scrollToLoadMore(page, 15, 1500);  // Final aggressive burst
+                    page.waitForTimeout(3000); // Wait for jobs to load
+                    jobElements = page.locator(workingSelector);
+                    jobCount = jobElements.count();
+                    System.out.println("[" + getSource() + "] After final scrolling: Found " + jobCount + " job listings");
+                }
             }
             
             if (jobCount == 0) {
@@ -485,6 +1229,71 @@ public abstract class BaseJobScraper implements JobScraper {
             // Step 10: Determine how many jobs to scrape
             Integer maxResultsInt = request.getMaxResults();
             int maxResults = maxResultsInt != null ? maxResultsInt : 50;
+            
+            // CRITICAL: Re-get the job elements right before scraping to get fresh count
+            jobElements = page.locator(workingSelector);
+            
+            // For LinkedIn with generic 'ul > li' selector, try to find job cards in the jobs list container
+            // LinkedIn loads job cards dynamically via API, so we need to look in the right container
+            if (getSource().equalsIgnoreCase("LinkedIn") && (workingSelector.equals("ul > li") || workingSelector.contains("ul > li"))) {
+                System.out.println("[" + getSource() + "] 🔄 Looking for job cards in jobs list container...");
+                // Wait a bit longer for dynamic content to load (LinkedIn uses API calls)
+                page.waitForTimeout(3000);
+                
+                // Try to find the jobs list container first, then get li elements from there
+                String[] containerSelectors = {
+                    "ul.scaffold-layout__list-container",
+                    "ul[class*='jobs-search-results']",
+                    "ul[class*='list-container']",
+                    "div[class*='jobs-search-results'] ul",
+                    "main ul",
+                    "div[class*='scaffold-layout__list'] ul"
+                };
+                
+                boolean foundContainer = false;
+                for (String containerSelector : containerSelectors) {
+                    try {
+                        Locator container = page.locator(containerSelector).first();
+                        if (container.count() > 0) {
+                            // Found container, get li elements from it
+                            Locator containerLis = container.locator("li");
+                            int count = containerLis.count();
+                            if (count > 0) {
+                                jobElements = containerLis;
+                                System.out.println("[" + getSource() + "]    ✅ Found " + count + " job cards in container: " + containerSelector);
+                                foundContainer = true;
+                                break;
+                            }
+                        }
+                    } catch (Exception e) {
+                        continue;
+                    }
+                }
+                
+                if (!foundContainer) {
+                    // Fallback: filter ul > li to only those with job links
+                    int totalCount = jobElements.count();
+                    System.out.println("[" + getSource() + "]    ⚠️  No container found, filtering " + totalCount + " list items to job cards...");
+                    try {
+                        Locator filtered = jobElements.filter(new Locator.FilterOptions().setHas(
+                            page.locator("a[href*='/jobs/view/'], a[href*='jobPosting']")
+                        ));
+                        int filteredCount = filtered.count();
+                        if (filteredCount > 0) {
+                            jobElements = filtered;
+                            System.out.println("[" + getSource() + "]    ✅ Filtered to " + filteredCount + " job cards with job links");
+                        } else {
+                            System.out.println("[" + getSource() + "]    ⚠️  No elements with job links found, will extract from all and filter during extraction");
+                        }
+                    } catch (Exception e) {
+                        System.out.println("[" + getSource() + "]    ⚠️  Filter failed, will extract from all: " + e.getMessage());
+                    }
+                }
+            }
+            
+            jobCount = jobElements.count();
+            System.out.println("[" + getSource() + "] Final job count before scraping: " + jobCount);
+            
             int jobsToScrape = Math.min(jobCount, maxResults);
             
             // Step 11: Loop through each job listing and extract data
@@ -492,10 +1301,24 @@ public abstract class BaseJobScraper implements JobScraper {
             for (int i = 0; i < jobsToScrape; i++) {
                 try {
                     System.out.println("[" + getSource() + "] Extracting job " + (i + 1) + " of " + jobsToScrape + "...");
-                    Locator jobElement = jobElements.nth(i);
                     
-                    // Scroll the job element into view to ensure it's loaded
-                    jobElement.scrollIntoViewIfNeeded();
+                    // Re-fetch the locator to ensure fresh query
+                    Locator jobElement = page.locator(workingSelector).nth(i);
+                    
+                    // Check if this element actually exists before trying to scroll
+                    int currentCount = page.locator(workingSelector).count();
+                    if (i >= currentCount) {
+                        System.err.println("[" + getSource() + "] ⚠️  Job #" + (i + 1) + " no longer exists (count is now " + currentCount + "), skipping...");
+                        continue;
+                    }
+                    
+                    // Scroll the job element into view to ensure it's loaded (with timeout)
+                    try {
+                        jobElement.scrollIntoViewIfNeeded(new Locator.ScrollIntoViewIfNeededOptions().setTimeout(5000));
+                    } catch (Exception scrollError) {
+                        System.err.println("[" + getSource() + "] ⚠️  Could not scroll job #" + (i + 1) + " into view, trying anyway: " + scrollError.getMessage());
+                    }
+                    
                     // Wait longer for dynamic content to load (especially for LinkedIn)
                     page.waitForTimeout(500); // Increased wait for content to load
                     
