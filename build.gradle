@@ -50,6 +50,20 @@ application {
     // Change to 'com.jobscrapper.JobScrapperApplication' when creating the actual REST API application
 }
 
+// Task for MCP server to run scraper with input file
+task runMcpScraper(type: JavaExec) {
+    group = 'application'
+    description = 'Runs the scraper with MCP input file'
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'com.jobScrapper.test.ScraperMain'
+    
+    // Get mcpInput from project property
+    def mcpInputFile = project.findProperty('mcpInput')
+    if (mcpInputFile) {
+        systemProperty 'mcpInput', mcpInputFile
+    }
+}
+
 test {
     useJUnitPlatform()
 }
