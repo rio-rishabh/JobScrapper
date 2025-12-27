@@ -459,30 +459,49 @@ public abstract class BaseJobScraper implements JobScraper {
             
             // Hide the "Chrome is being controlled by automated test software" banner
             // This banner appears when automation is detected
-            const style = document.createElement('style');
-            style.textContent = '[id*="automation"], [class*="automation"], [data-automation], [aria-label*="automated"], [aria-label*="controlled"], [class*="controlled"], [id*="controlled"] { display: none !important; visibility: hidden !important; opacity: 0 !important; height: 0 !important; }';
-            document.head.appendChild(style);
+            // Use safer DOM manipulation to avoid interfering with LinkedIn's DOM
+            try {
+                if (document.head) {
+                    const style = document.createElement('style');
+                    style.textContent = '[id*="automation"], [class*="automation"], [data-automation], [aria-label*="automated"], [aria-label*="controlled"], [class*="controlled"], [id*="controlled"] { display: none !important; visibility: hidden !important; opacity: 0 !important; height: 0 !important; }';
+                    document.head.appendChild(style);
+                }
+            } catch (e) {
+                // Silently fail - don't interfere with page
+            }
             
-            // Also try to remove the banner via DOM manipulation (more aggressive)
-            setInterval(() => {
-                // Remove automation banners
-                const banners = document.querySelectorAll('[id*="automation"], [class*="automation"], [data-automation], [aria-label*="automated"], [aria-label*="controlled"], [class*="controlled"], [id*="controlled"], [class*="infobar"], [id*="infobar"]');
-                banners.forEach(banner => {
-                    banner.remove();
-                    banner.style.display = 'none';
-                    banner.style.visibility = 'hidden';
-                });
+            // Also try to remove the banner via DOM manipulation (less aggressive, safer)
+            // Only run if document is ready and avoid interfering with LinkedIn's DOM
+            let bannerRemovalInterval = null;
+            function startBannerRemoval() {
+                if (bannerRemovalInterval) return; // Already running
                 
-                // Remove any elements with text about automation
-                const allElements = document.querySelectorAll('*');
-                allElements.forEach(el => {
-                    const text = el.textContent || '';
-                    if (text.includes('automated') || text.includes('controlled by') || text.includes('test software')) {
-                        el.style.display = 'none';
-                        el.style.visibility = 'hidden';
+                bannerRemovalInterval = setInterval(() => {
+                    try {
+                        // Only remove automation banners, don't touch other elements
+                        const banners = document.querySelectorAll('[id*="automation"], [class*="automation"], [data-automation], [aria-label*="automated"], [aria-label*="controlled"], [class*="controlled"], [id*="controlled"], [class*="infobar"], [id*="infobar"]');
+                        banners.forEach(banner => {
+                            if (banner && banner.parentNode) {
+                                try {
+                                    banner.style.display = 'none';
+                                    banner.style.visibility = 'hidden';
+                                } catch (e) {
+                                    // Ignore errors
+                                }
+                            }
+                        });
+                    } catch (e) {
+                        // Silently fail - don't break the page
                     }
-                });
-            }, 500);
+                }, 2000); // Less frequent to avoid interference
+            }
+            
+            // Start banner removal when DOM is ready
+            if (document.readyState === 'loading') {
+                document.addEventListener('DOMContentLoaded', startBannerRemoval);
+            } else {
+                startBannerRemoval();
+            }
         """);
         }  // End of if (!connectedToExisting)
         
@@ -504,107 +523,92 @@ public abstract class BaseJobScraper implements JobScraper {
             }
             
             // Step 6: Wait for page to load with human-like behavior
-            // CRITICAL: Wait for ALL resources to load (like linkedin_scraper does)
-            System.out.println("[" + getSource() + "] Waiting for page to fully load (including all resources)...");
+            // CRITICAL: Wait for page to load, but don't waste too much time on LinkedIn
+            System.out.println("[" + getSource() + "] Waiting for page to fully load...");
             try {
-                // Wait for network to be idle (all resources loaded) - this is KEY for LinkedIn
-                page.waitForLoadState(com.microsoft.playwright.options.LoadState.NETWORKIDLE, 
-                    new Page.WaitForLoadStateOptions().setTimeout(30000));
-                System.out.println("[" + getSource() + "] ✅ Network idle - all resources loaded");
-            } catch (Exception e) {
-                System.err.println("[" + getSource() + "] ⚠️  Load state wait error, using fallback: " + e.getMessage());
-                // Fallback: wait for basic load state
-                try {
-                page.waitForLoadState();
-                    System.out.println("[" + getSource() + "] ✅ Basic page load completed");
-                } catch (Exception e2) {
-                    System.err.println("[" + getSource() + "] ⚠️  Even fallback failed, continuing anyway...");
+                // First wait for DOM content loaded (faster)
+                page.waitForLoadState(com.microsoft.playwright.options.LoadState.DOMCONTENTLOADED, 
+                    new Page.WaitForLoadStateOptions().setTimeout(15000));
+                System.out.println("[" + getSource() + "] ✅ DOM content loaded");
+                
+                // For LinkedIn, skip the network idle wait - it takes too long and isn't needed
+                if (!getSource().equalsIgnoreCase("LinkedIn")) {
+                    page.waitForLoadState(com.microsoft.playwright.options.LoadState.NETWORKIDLE, 
+                        new Page.WaitForLoadStateOptions().setTimeout(30000));
+                    System.out.println("[" + getSource() + "] ✅ Network idle - all resources loaded");
+                } else {
+                    // For LinkedIn, just wait a fixed 3 seconds
+                    page.waitForTimeout(3000);
+                    System.out.println("[" + getSource() + "] ✅ LinkedIn quick load complete");
                 }
-            }
-            
-            // Additional wait for DOM to be fully interactive
-            try {
-                page.waitForLoadState(com.microsoft.playwright.options.LoadState.DOMCONTENTLOADED);
             } catch (Exception e) {
-                // Continue anyway
+                System.err.println("[" + getSource() + "] ⚠️  Load state wait timed out (this is often OK): " + e.getMessage());
+                // Fallback: just wait a fixed time and continue
+                page.waitForTimeout(3000);
+                System.out.println("[" + getSource() + "] ✅ Continuing after fallback wait");
             }
             
             // Human-like delay after page loads
             humanDelay(page, 2000, 4000);
             
-            // Step 6.5: For LinkedIn, force job cards to load with hard reload
-            // This runs REGARDLESS of whether network idle succeeded or not
+            // Step 6.5: For LinkedIn - check if we already have job cards on search results page
+            // Skip complex navigation if we already see jobs
             if (getSource().equalsIgnoreCase("LinkedIn")) {
+                System.out.println("[" + getSource() + "] 🔄 For LinkedIn: Checking for job cards on current page...");
+                System.out.println("[" + getSource() + "]    Current URL: " + page.url());
+                
+                // First check if we already have job cards visible on the search page
+                page.waitForTimeout(3000);
+                int existingJobCards = page.locator("li[data-occludable-job-id], div.job-card-container, ul.scaffold-layout__list-container > li, li.jobs-search-results__list-item").count();
+                
+                if (existingJobCards > 0) {
+                    System.out.println("[" + getSource() + "]    ✅ Found " + existingJobCards + " job cards on search page - skipping navigation flow!");
+                    // Job cards already visible, no need for complex navigation
+                } else {
+                    System.out.println("[" + getSource() + "]    No job cards found yet, trying Jobs icon → Show all flow...");
                 try {
                     // Wait a bit for page to be interactive
                     page.waitForTimeout(3000);
                     
-                    // Check current URL - if we're already on jobs search results page
-                    String currentUrl = page.url().toLowerCase();
-                    boolean isOnJobsSearchPage = currentUrl.contains("/jobs/search") || currentUrl.contains("/jobs/collections");
+                    // Step 1: ALWAYS click the Jobs icon (third icon in navigation - bag/briefcase icon)
+                    // This is required to get to the jobs page, then Show all takes us to collections/recommended
+                    String[] jobsIconSelectors = {
+                        "nav li:nth-child(3) a",  // Third item in nav (Jobs icon) - PRIORITIZE THIS
+                        ".global-nav__primary-items li:nth-child(3) a",  // Third item in global nav
+                        "header nav li:nth-child(3) a",  // Third item in header nav
+                        "nav a[href*='/jobs']",  // Navigation link to jobs
+                        "header a[href*='/jobs']",  // Header link
+                        ".global-nav__primary-link[href*='/jobs']",  // Global nav primary link
+                        "a.global-nav__primary-link[href*='/jobs']",  // Global nav with href
+                        "a[aria-label*='Jobs']",  // Aria label with Jobs
+                        "a[data-tracking-control-name='nav_jobs']",  // Tracking control name
+                        "a[href='/jobs/']",  // Direct jobs link
+                        "a[href*='linkedin.com/jobs']"  // Any jobs link
+                    };
                     
-                    if (isOnJobsSearchPage) {
-                        // We're already on a jobs search/collection page - DON'T click Jobs icon!
-                        // That would navigate us AWAY from the search results.
-                        // Instead, just do a hard reload to force job cards to render
-                        System.out.println("[" + getSource() + "] ✅ Already on jobs search page: " + page.url());
-                        System.out.println("[" + getSource() + "] 🔄 Performing hard reload to force job cards to load...");
-                        
-                        page.reload(new Page.ReloadOptions().setWaitUntil(com.microsoft.playwright.options.WaitUntilState.DOMCONTENTLOADED));
-                        page.waitForTimeout(3000);
-                        
+                    boolean clickedJobsIcon = false;
+                    for (String selector : jobsIconSelectors) {
                         try {
-                            page.waitForLoadState(com.microsoft.playwright.options.LoadState.NETWORKIDLE,
-                                new Page.WaitForLoadStateOptions().setTimeout(15000));
-                            System.out.println("[" + getSource() + "] ✅ Page reloaded and network idle");
-                        } catch (Exception e) {
-                            System.out.println("[" + getSource() + "] ⚠️  Network idle timeout after reload, continuing...");
-                        }
-                        page.waitForTimeout(3000);
-                        System.out.println("[" + getSource() + "] ✅ Ready to start scraping - job list should be visible");
-                        
-                    } else {
-                        // Not on a jobs search page yet - click Jobs icon and Show all
-                        System.out.println("[" + getSource() + "] 🔄 Not on jobs search page, clicking Jobs icon and 'Show all'...");
-                        
-                        // Step 1: Click the Jobs icon (third icon in navigation - bag/briefcase icon)
-                        String[] jobsIconSelectors = {
-                            "nav a[href*='/jobs']",  // Navigation link to jobs
-                            "header a[href*='/jobs']",  // Header link
-                            ".global-nav__primary-link[href*='/jobs']",  // Global nav primary link
-                            "a.global-nav__primary-link[href*='/jobs']",  // Global nav with href
-                            "nav li:nth-child(3) a",  // Third item in nav (Jobs icon)
-                            "header nav li:nth-child(3) a",  // Third item in header nav
-                            ".global-nav__primary-items li:nth-child(3) a",  // Third item in global nav
-                            "a[aria-label*='Jobs']",  // Aria label with Jobs
-                            "a[data-tracking-control-name='nav_jobs']",  // Tracking control name
-                            "a[href='/jobs/']",  // Direct jobs link
-                            "a[href*='linkedin.com/jobs']"  // Any jobs link
-                        };
-                        
-                        boolean clickedJobsIcon = false;
-                        for (String selector : jobsIconSelectors) {
-                            try {
-                                Locator jobsIcon = page.locator(selector).first();
-                                if (jobsIcon.isVisible(new Locator.IsVisibleOptions().setTimeout(3000.0))) {
-                                    System.out.println("[" + getSource() + "]    Found Jobs icon with selector: " + selector);
-                                    jobsIcon.click(new Locator.ClickOptions().setTimeout(5000.0));
-                                    System.out.println("[" + getSource() + "]    ✅ Clicked Jobs icon!");
-                                    clickedJobsIcon = true;
-                                    
-                                    // Wait for navigation
-                                    page.waitForTimeout(3000);
-                                    break;
-                                }
-                            } catch (Exception e) {
-                                // Try next selector
-                                continue;
+                            Locator jobsIcon = page.locator(selector).first();
+                            if (jobsIcon.isVisible(new Locator.IsVisibleOptions().setTimeout(3000.0))) {
+                                System.out.println("[" + getSource() + "]    Found Jobs icon with selector: " + selector);
+                                jobsIcon.click(new Locator.ClickOptions().setTimeout(5000.0));
+                                System.out.println("[" + getSource() + "]    ✅ Clicked Jobs icon!");
+                                clickedJobsIcon = true;
+                                
+                                // Wait for navigation
+                                page.waitForTimeout(3000);
+                                break;
                             }
+                        } catch (Exception e) {
+                            // Try next selector
+                            continue;
                         }
-                        
-                        if (clickedJobsIcon) {
-                            // Wait a bit after clicking Jobs icon for page to navigate
-                            page.waitForTimeout(3000);
+                    }
+                    
+                    if (clickedJobsIcon) {
+                        // Wait a bit after clicking Jobs icon for page to navigate
+                        page.waitForTimeout(3000);
                         
                         // Step 2: Click "Show all" button/link to reveal full job list
                         System.out.println("[" + getSource() + "]    🔄 Looking for 'Show all' button to list all jobs...");
@@ -628,11 +632,52 @@ public abstract class BaseJobScraper implements JobScraper {
                                 Locator showAllButton = page.locator(selector).first();
                                 if (showAllButton.isVisible(new Locator.IsVisibleOptions().setTimeout(3000.0))) {
                                     System.out.println("[" + getSource() + "]    Found 'Show all' with selector: " + selector);
+                                    
+                                    // Try to get the href and navigate directly if it's a link
+                                    try {
+                                        String href = showAllButton.getAttribute("href");
+                                        if (href != null && !href.isEmpty()) {
+                                            // Make it absolute URL if needed
+                                            if (href.startsWith("/")) {
+                                                href = "https://www.linkedin.com" + href;
+                                            } else if (!href.startsWith("http")) {
+                                                href = "https://www.linkedin.com/" + href;
+                                            }
+                                            System.out.println("[" + getSource() + "]    Found href: " + href);
+                                            System.out.println("[" + getSource() + "]    🔄 Navigating directly to collections/recommended page...");
+                                            page.navigate(href);
+                                            page.waitForTimeout(3000);
+                                            System.out.println("[" + getSource() + "]    ✅ Navigated to: " + page.url());
+                                            clickedShowAll = true;
+                                            showAllSelectorUsed = selector;
+                                            break;
+                                        }
+                                    } catch (Exception e) {
+                                        // If getting href fails, fall back to clicking
+                                        System.out.println("[" + getSource() + "]    No href found, clicking instead...");
+                                    }
+                                    
+                                    // Fallback: Click the button/link
                                     showAllButton.click(new Locator.ClickOptions().setTimeout(5000.0));
                                     System.out.println("[" + getSource() + "]    ✅ Clicked 'Show all'!");
                                     clickedShowAll = true;
                                     showAllSelectorUsed = selector;
-                                    page.waitForTimeout(3000);
+                                    
+                                    // Wait for navigation to collections/recommended page
+                                    System.out.println("[" + getSource() + "]    ⏳ Waiting for navigation to collections/recommended page...");
+                                    try {
+                                        // Wait for URL to contain 'collections' or 'recommended'
+                                        page.waitForURL("**/jobs/collections/**", new Page.WaitForURLOptions().setTimeout(10000));
+                                        System.out.println("[" + getSource() + "]    ✅ Navigated to collections/recommended page: " + page.url());
+                                    } catch (Exception e) {
+                                        // If URL doesn't change, wait a bit and check current URL
+                                        page.waitForTimeout(5000);
+                                        String currentUrl = page.url();
+                                        System.out.println("[" + getSource() + "]    Current URL after 'Show all': " + currentUrl);
+                                        if (!currentUrl.contains("collections") && !currentUrl.contains("recommended")) {
+                                            System.out.println("[" + getSource() + "]    ⚠️  URL didn't change to collections/recommended, but continuing...");
+                                        }
+                                    }
                                     break;
                                 }
                             } catch (Exception e) {
@@ -642,48 +687,175 @@ public abstract class BaseJobScraper implements JobScraper {
                         }
                         
                         if (clickedShowAll) {
-                            // CRITICAL FIX: Hard reload the page after clicking Show all
-                            // User discovered that Cmd+Shift+R (hard reload) + clicking Show all again loads all jobs
-                            System.out.println("[" + getSource() + "]    🔄 Performing hard reload to force job cards to load...");
-                            page.reload(new Page.ReloadOptions().setWaitUntil(com.microsoft.playwright.options.WaitUntilState.DOMCONTENTLOADED));
-                            page.waitForTimeout(3000);
+                            // Check if we're now on the collections/recommended page
+                            String currentUrl = page.url();
+                            boolean isOnCollectionsPage = currentUrl.contains("collections") || currentUrl.contains("recommended");
                             
-                            // Wait for page to be interactive
-                            try {
-                                page.waitForLoadState(com.microsoft.playwright.options.LoadState.NETWORKIDLE,
-                                    new Page.WaitForLoadStateOptions().setTimeout(15000));
-                            } catch (Exception e) {
-                                System.out.println("[" + getSource() + "]    ⚠️  Network idle timeout after reload, continuing...");
-                            }
-                            page.waitForTimeout(2000);
-                            
-                            // Click 'Show all' again after reload - this is what makes jobs load!
-                            System.out.println("[" + getSource() + "]    🔄 Clicking 'Show all' again after reload...");
-                            for (String selector : showAllSelectors) {
-                                try {
-                                    Locator showAllButton = page.locator(selector).first();
-                                    if (showAllButton.isVisible(new Locator.IsVisibleOptions().setTimeout(3000.0))) {
-                                        showAllButton.click(new Locator.ClickOptions().setTimeout(5000.0));
-                                        System.out.println("[" + getSource() + "]    ✅ Clicked 'Show all' again after reload!");
-                                        break;
+                            if (isOnCollectionsPage) {
+                                System.out.println("[" + getSource() + "]    ✅ Successfully navigated to collections/recommended page!");
+                                System.out.println("[" + getSource() + "]    Current URL: " + currentUrl);
+                                
+                                // CRITICAL: Wait longer for GraphQL API calls to complete and job cards to render
+                                // LinkedIn uses GraphQL to load job data, so we need to wait for that
+                                System.out.println("[" + getSource() + "]    ⏳ Waiting for job cards to load via GraphQL API...");
+                                page.waitForTimeout(5000); // Initial wait
+                                
+                                // Wait for job cards to appear - check for job card elements
+                                int maxWaitAttempts = 10;
+                                boolean jobCardsFound = false;
+                                for (int attempt = 0; attempt < maxWaitAttempts; attempt++) {
+                                    try {
+                                        // Check for job card elements
+                                        int jobCardCount = page.locator("li[data-occludable-job-id], li.scaffold-layout__list-item, a[href*='/jobs/view/']").count();
+                                        if (jobCardCount > 0) {
+                                            System.out.println("[" + getSource() + "]    ✅ Found " + jobCardCount + " job cards after " + (attempt + 1) + " attempts!");
+                                            jobCardsFound = true;
+                                            break;
+                                        }
+                                    } catch (Exception e) {
+                                        // Continue waiting
                                     }
-                                } catch (Exception e) {
-                                    continue;
+                                    page.waitForTimeout(2000); // Wait 2 seconds between checks
                                 }
-                            }
-                            
-                            // Wait for jobs to load after second click
-                            System.out.println("[" + getSource() + "]    ⏳ Waiting for full job list to load...");
-                            page.waitForTimeout(5000);
-                            try {
-                                page.waitForLoadState(com.microsoft.playwright.options.LoadState.NETWORKIDLE,
-                                    new Page.WaitForLoadStateOptions().setTimeout(20000));
-                                System.out.println("[" + getSource() + "]    ✅ Jobs list loaded!");
-                            } catch (Exception e) {
-                                System.out.println("[" + getSource() + "]    ⚠️  Network idle timeout, but continuing...");
+                                
+                                if (!jobCardsFound) {
+                                    System.out.println("[" + getSource() + "]    ⚠️  Job cards not found after waiting - GraphQL may have failed");
+                                    System.out.println("[" + getSource() + "]    ⚠️  This might be due to automation detection - continuing anyway...");
+                                }
+                                
+                                // CRITICAL: Check if left panel is visible/has job cards
+                                // Sometimes LinkedIn collapses the left panel after navigation
+                                System.out.println("[" + getSource() + "]    🔍 Checking if left panel with job cards is visible...");
+                                page.waitForTimeout(2000);
+                                
+                                int visibleJobCards = page.locator("li[data-occludable-job-id], li.scaffold-layout__list-item, a[href*='/jobs/view/']").count();
+                                if (visibleJobCards == 0) {
+                                    System.out.println("[" + getSource() + "]    ⚠️  Left panel appears to be collapsed or hidden!");
+                                    System.out.println("[" + getSource() + "]    🔄 Attempting to restore left panel...");
+                                    
+                                    // Try to find and click buttons to show/expand the left panel
+                                    String[] expandSelectors = {
+                                        "button[aria-label*='Show']",
+                                        "button[aria-label*='Expand']",
+                                        "button[aria-label*='View']",
+                                        "a:has-text('Show all jobs')",
+                                        "a:has-text('View all jobs')",
+                                        "button:has-text('Show')",
+                                        ".jobs-search-results__show-all",
+                                        "button.jobs-search-results__show-all"
+                                    };
+                                    
+                                    boolean expanded = false;
+                                    for (String selector : expandSelectors) {
+                                        try {
+                                            Locator expandButton = page.locator(selector).first();
+                                            if (expandButton.isVisible(new Locator.IsVisibleOptions().setTimeout(2000.0))) {
+                                                System.out.println("[" + getSource() + "]    Found expand button: " + selector);
+                                                expandButton.click(new Locator.ClickOptions().setTimeout(3000.0));
+                                                System.out.println("[" + getSource() + "]    ✅ Clicked expand button!");
+                                                page.waitForTimeout(3000);
+                                                expanded = true;
+                                                break;
+                                            }
+                                        } catch (Exception e) {
+                                            continue;
+                                        }
+                                    }
+                                    
+                                    // If no expand button found, try scrolling to trigger panel to show
+                                    if (!expanded) {
+                                        System.out.println("[" + getSource() + "]    🔄 No expand button found, trying scroll to trigger panel...");
+                                        page.evaluate("window.scrollTo(0, 0);"); // Scroll to top
+                                        page.waitForTimeout(1000);
+                                        page.evaluate("window.scrollTo(0, 500);"); // Scroll down
+                                        page.waitForTimeout(2000);
+                                    }
+                                    
+                                    // Check again after trying to expand
+                                    visibleJobCards = page.locator("li[data-occludable-job-id], li.scaffold-layout__list-item, a[href*='/jobs/view/']").count();
+                                    if (visibleJobCards > 0) {
+                                        System.out.println("[" + getSource() + "]    ✅ Left panel restored! Found " + visibleJobCards + " job cards");
+                                    } else {
+                                        System.out.println("[" + getSource() + "]    ⚠️  Left panel still not visible, trying page reload...");
+                                        // Try reloading the page to restore the panel
+                                        page.reload(new Page.ReloadOptions().setWaitUntil(com.microsoft.playwright.options.WaitUntilState.DOMCONTENTLOADED));
+                                        page.waitForTimeout(5000);
+                                        
+                                        // Check one more time after reload
+                                        visibleJobCards = page.locator("li[data-occludable-job-id], li.scaffold-layout__list-item, a[href*='/jobs/view/']").count();
+                                        if (visibleJobCards > 0) {
+                                            System.out.println("[" + getSource() + "]    ✅ Left panel restored after reload! Found " + visibleJobCards + " job cards");
+                                        } else {
+                                            System.out.println("[" + getSource() + "]    ⚠️  Left panel still not visible after reload");
+                                            System.out.println("[" + getSource() + "]    ⚠️  This is likely due to automation detection blocking the job list");
+                                            System.out.println("[" + getSource() + "]    ⚠️  The scraper will continue but may find 0 jobs");
+                                        }
+                                    }
+                                } else {
+                                    System.out.println("[" + getSource() + "]    ✅ Left panel is visible with " + visibleJobCards + " job cards");
+                                }
+                                
+                                // Additional wait for network
+                                try {
+                                    page.waitForLoadState(com.microsoft.playwright.options.LoadState.NETWORKIDLE,
+                                        new Page.WaitForLoadStateOptions().setTimeout(10000));
+                                    System.out.println("[" + getSource() + "]    ✅ Network idle");
+                                } catch (Exception e) {
+                                    System.out.println("[" + getSource() + "]    ⚠️  Network idle timeout, but continuing...");
+                                }
+                                page.waitForTimeout(3000); // Final wait
+                                System.out.println("[" + getSource() + "]    ✅ Ready to start scraping - full job list should be visible");
+                            } else {
+                                // If not on collections page yet, do hard reload and try Show all again
+                                System.out.println("[" + getSource() + "]    ⚠️  Not on collections page yet, performing hard reload...");
+                                page.reload(new Page.ReloadOptions().setWaitUntil(com.microsoft.playwright.options.WaitUntilState.DOMCONTENTLOADED));
+                                page.waitForTimeout(3000);
+                                
+                                try {
+                                    page.waitForLoadState(com.microsoft.playwright.options.LoadState.NETWORKIDLE,
+                                        new Page.WaitForLoadStateOptions().setTimeout(15000));
+                                } catch (Exception e) {
+                                    System.out.println("[" + getSource() + "]    ⚠️  Network idle timeout after reload, continuing...");
+                                }
+                                page.waitForTimeout(2000);
+                                
+                                // Click 'Show all' again after reload
+                                System.out.println("[" + getSource() + "]    🔄 Clicking 'Show all' again after reload...");
+                                for (String selector : showAllSelectors) {
+                                    try {
+                                        Locator showAllButton = page.locator(selector).first();
+                                        if (showAllButton.isVisible(new Locator.IsVisibleOptions().setTimeout(3000.0))) {
+                                            showAllButton.click(new Locator.ClickOptions().setTimeout(5000.0));
+                                            System.out.println("[" + getSource() + "]    ✅ Clicked 'Show all' again after reload!");
+                                            
+                                            // Wait for navigation again
+                                            page.waitForTimeout(3000);
+                                            try {
+                                                page.waitForURL("**/jobs/collections/**", new Page.WaitForURLOptions().setTimeout(10000));
+                                                System.out.println("[" + getSource() + "]    ✅ Navigated to collections/recommended page: " + page.url());
+                                            } catch (Exception e) {
+                                                System.out.println("[" + getSource() + "]    Current URL: " + page.url());
+                                            }
+                                            break;
+                                        }
+                                    } catch (Exception e) {
+                                        continue;
+                                    }
+                                }
+                                
+                                // Wait for jobs to load
+                                System.out.println("[" + getSource() + "]    ⏳ Waiting for full job list to load...");
                                 page.waitForTimeout(5000);
+                                try {
+                                    page.waitForLoadState(com.microsoft.playwright.options.LoadState.NETWORKIDLE,
+                                        new Page.WaitForLoadStateOptions().setTimeout(20000));
+                                    System.out.println("[" + getSource() + "]    ✅ Jobs list loaded!");
+                                } catch (Exception e) {
+                                    System.out.println("[" + getSource() + "]    ⚠️  Network idle timeout, but continuing...");
+                                    page.waitForTimeout(5000);
+                                }
+                                System.out.println("[" + getSource() + "]    ✅ Ready to start scraping - full job list should be visible");
                             }
-                            System.out.println("[" + getSource() + "]    ✅ Ready to start scraping - full job list should be visible");
                         }
                         
                         if (!clickedShowAll) {
@@ -715,10 +887,10 @@ public abstract class BaseJobScraper implements JobScraper {
                             }
                         }
                     }
-                    } // End of else (not on jobs search page)
                 } catch (Exception e) {
                     System.out.println("[" + getSource() + "]    ⚠️  Error in Jobs icon/Show all flow: " + e.getMessage() + " - continuing anyway");
                 }
+                } // end of else block (no existing job cards)
             }
             
             // Step 7: Handle login if needed (site-specific, optional)
@@ -728,12 +900,22 @@ public abstract class BaseJobScraper implements JobScraper {
             try {
                 handleLoginIfNeeded(page);
                 
-                // For LinkedIn, if we're already on jobs search results page, skip verification wait
+                // For LinkedIn, if we're on any jobs page, skip verification wait
+                // These are legitimate LinkedIn pages, not verification/CAPTCHA pages
                 boolean skipVerificationCheck = false;
                 if (getSource().equalsIgnoreCase("LinkedIn")) {
                     String currentUrl = page.url().toLowerCase();
-                    if (currentUrl.contains("/jobs/search") || currentUrl.contains("/jobs/search-results")) {
-                        System.out.println("[" + getSource() + "] ✅ Already on jobs list page - skipping verification check");
+                    String currentTitle = page.title().toLowerCase();
+                    
+                    // Check if we're on any legitimate LinkedIn jobs page
+                    boolean isOnJobsPage = currentUrl.contains("/jobs/") || 
+                                           currentUrl.contains("/jobs?") ||
+                                           currentUrl.endsWith("/jobs") ||
+                                           (currentTitle.contains("jobs") && currentTitle.contains("linkedin"));
+                    
+                    if (isOnJobsPage) {
+                        System.out.println("[" + getSource() + "] ✅ On LinkedIn jobs page - skipping verification check");
+                        System.out.println("[" + getSource() + "]    URL: " + page.url());
                         skipVerificationCheck = true;
                     }
                 }
@@ -824,13 +1006,15 @@ public abstract class BaseJobScraper implements JobScraper {
             System.out.println("[" + getSource() + "] Using selector: " + jobListSelector);
             
             // Final check: Make sure we're not still on Cloudflare/reCAPTCHA page
-            // But skip for LinkedIn if we're already on jobs list page
+            // But skip for LinkedIn if we're already on jobs list page (search, collections, or any jobs page)
             boolean skipFinalVerificationCheck = false;
             if (getSource().equalsIgnoreCase("LinkedIn")) {
                 String currentUrl = page.url().toLowerCase();
-                if (currentUrl.contains("/jobs/search") || currentUrl.contains("/jobs/search-results")) {
+                // Skip verification check if we're on ANY LinkedIn jobs page
+                if (currentUrl.contains("/jobs/") || currentUrl.contains("/jobs?")) {
                     skipFinalVerificationCheck = true;
-                    System.out.println("[" + getSource() + "] ✅ Skipping final verification check - already on jobs list page");
+                    System.out.println("[" + getSource() + "] ✅ Skipping final verification check - already on LinkedIn jobs page");
+                    System.out.println("[" + getSource() + "]    URL: " + page.url());
                 }
             }
             
@@ -918,11 +1102,11 @@ public abstract class BaseJobScraper implements JobScraper {
                     // Then get their parent containers. This is more reliable than searching for containers.
                     if (getSource().equalsIgnoreCase("LinkedIn")) {
                         System.out.println("[" + getSource() + "] 🔍 LinkedIn: Searching for job card content elements first...");
-                        String[] contentSelectors = {
-                            "h3.base-search-card__title",  // PROVEN: Job card title
-                            "a.base-card__full-link[href*='/jobs/view/']",  // PROVEN: Job card link
-                            "a[href*='/jobs/view/']"  // Any job view link
-                        };
+                    String[] contentSelectors = {
+                        "a[href*='/jobs/view/']",  // Any job view link - PRIORITIZE THIS (works on collections page!)
+                        "h3.base-search-card__title",  // PROVEN: Job card title
+                        "a.base-card__full-link[href*='/jobs/view/']"  // PROVEN: Job card link
+                    };
                         
                         for (String contentSelector : contentSelectors) {
                             try {
@@ -1144,20 +1328,29 @@ public abstract class BaseJobScraper implements JobScraper {
                         int divWithEntityUrn = page.locator("div[data-entity-urn*='jobPosting']").count();
                         
                         // Check for job card content elements (proven selectors)
+                        // IMPORTANT: Check a[href*='/jobs/view/'] FIRST - this is what worked during wait phase!
+                        int anyJobLinks = page.locator("a[href*='/jobs/view/']").count();
                         int jobTitles = page.locator("h3.base-search-card__title").count();
                         int jobLinks = page.locator("a.base-card__full-link[href*='/jobs/view/']").count();
-                        int anyJobLinks = page.locator("a[href*='/jobs/view/']").count();
                         
                         System.err.println("[" + getSource() + "]    DEBUG: article elements: " + articleCount);
                         System.err.println("[" + getSource() + "]    DEBUG: li elements: " + liCount);
                         System.err.println("[" + getSource() + "]    DEBUG: div[data-job-id]: " + divWithJobId);
                         System.err.println("[" + getSource() + "]    DEBUG: div[data-entity-urn*='jobPosting']: " + divWithEntityUrn);
+                        System.err.println("[" + getSource() + "]    DEBUG: a[href*='/jobs/view/']: " + anyJobLinks + " (THIS IS WHAT WORKED!)");
                         System.err.println("[" + getSource() + "]    DEBUG: h3.base-search-card__title: " + jobTitles);
                         System.err.println("[" + getSource() + "]    DEBUG: a.base-card__full-link[href*='/jobs/view/']: " + jobLinks);
-                        System.err.println("[" + getSource() + "]    DEBUG: a[href*='/jobs/view/']: " + anyJobLinks);
                         
                         // If we found job card content elements, use them!
-                        if (jobTitles > 0 || jobLinks > 0) {
+                        // PRIORITIZE a[href*='/jobs/view/'] since that's what worked during wait phase
+                        if (anyJobLinks > 0) {
+                            String contentSelector = "a[href*='/jobs/view/']";
+                            System.err.println("[" + getSource() + "]    ✅ Found job card links! Using: " + contentSelector);
+                            workingSelector = contentSelector;
+                            jobElements = page.locator(workingSelector);
+                            jobCount = jobElements.count();
+                            System.out.println("[" + getSource() + "] ✅ Using job card link selector: " + workingSelector + " (found " + jobCount + " elements)");
+                        } else if (jobTitles > 0 || jobLinks > 0) {
                             String contentSelector = jobTitles > 0 ? "h3.base-search-card__title" : "a.base-card__full-link[href*='/jobs/view/']";
                             System.err.println("[" + getSource() + "]    ✅ Found job card content! Using: " + contentSelector);
                             workingSelector = contentSelector;
@@ -1194,26 +1387,24 @@ public abstract class BaseJobScraper implements JobScraper {
                 }
             }
             
-            // If we found fewer jobs than requested, try scrolling more aggressively
+            // If we found very few jobs (less than 5), try ONE quick scroll
+            // Skip extra scrolling if we have a reasonable number of jobs already
             int maxRequested = request.getMaxResults() != null ? request.getMaxResults() : 50;
             
-            if (jobCount < maxRequested && jobCount < 20) {
-                System.out.println("[" + getSource() + "] ⚠️  Only found " + jobCount + " jobs (requested " + maxRequested + "), trying additional scrolling...");
-                scrollToLoadMore(page, 10, 2000);  // More aggressive scrolling
-                page.waitForTimeout(3000); // Wait for jobs to load
+            if (jobCount < 5) {
+                System.out.println("[" + getSource() + "] ⚠️  Only found " + jobCount + " jobs, trying one quick scroll...");
+                int initialJobCount = jobCount;
+                scrollToLoadMore(page, 2, 1000);  // Very quick 2-scroll attempt
+                page.waitForTimeout(1500);
                 jobElements = page.locator(workingSelector);
                 jobCount = jobElements.count();
-                System.out.println("[" + getSource() + "] After additional scrolling: Found " + jobCount + " job listings");
-                
-                // If still not enough, try one more time
-                if (jobCount < maxRequested / 2) {
-                    System.out.println("[" + getSource() + "] ⚠️  Still only " + jobCount + " jobs, trying final scroll burst...");
-                    scrollToLoadMore(page, 15, 1500);  // Final aggressive burst
-                    page.waitForTimeout(3000); // Wait for jobs to load
-                    jobElements = page.locator(workingSelector);
-                    jobCount = jobElements.count();
-                    System.out.println("[" + getSource() + "] After final scrolling: Found " + jobCount + " job listings");
+                if (jobCount > initialJobCount) {
+                    System.out.println("[" + getSource() + "] ⏩ Found " + jobCount + " jobs after scroll");
+                } else {
+                    System.out.println("[" + getSource() + "] ℹ️  No more jobs to load, continuing with " + jobCount + " jobs");
                 }
+            } else {
+                System.out.println("[" + getSource() + "] ✅ Found " + jobCount + " jobs (enough to proceed)");
             }
             
             if (jobCount == 0) {
@@ -1358,22 +1549,27 @@ public abstract class BaseJobScraper implements JobScraper {
                         String company = job.getCompany() != null ? job.getCompany() : "NO COMPANY";
                         System.out.println("[" + getSource() + "] 📝 Extracted job #" + (i + 1) + ": title='" + title + "', company='" + company + "'");
                         
-                        // Enrich job with description from detail page if needed
-                        String currentDescription = job.getDescription();
-                        if (currentDescription == null || currentDescription.isEmpty() || 
-                            currentDescription.equals("No description available") || currentDescription.length() < 100) {
-                            
-                            String jobURL = job.getUrl();
-                            if (jobURL != null && !jobURL.isEmpty()) {
-                                try {
-                                    String enrichedDescription = extractDescriptionFromDetailPage(page, jobURL);
-                                    if (enrichedDescription != null && !enrichedDescription.isEmpty() && 
-                                        !enrichedDescription.equals("No description available") && enrichedDescription.length() > 20) {
-                                        job.description(enrichedDescription);
-                                        System.out.println("[" + getSource() + "] ✅ Enriched description (" + enrichedDescription.length() + " chars)");
+                        // Skip description enrichment for LinkedIn to speed up scraping
+                        // The description can be fetched later if needed
+                        // Description enrichment navigates to each job's detail page which is very slow
+                        if (!getSource().equalsIgnoreCase("LinkedIn")) {
+                            // Enrich job with description from detail page if needed (for non-LinkedIn scrapers)
+                            String currentDescription = job.getDescription();
+                            if (currentDescription == null || currentDescription.isEmpty() || 
+                                currentDescription.equals("No description available") || currentDescription.length() < 100) {
+                                
+                                String jobURL = job.getUrl();
+                                if (jobURL != null && !jobURL.isEmpty()) {
+                                    try {
+                                        String enrichedDescription = extractDescriptionFromDetailPage(page, jobURL);
+                                        if (enrichedDescription != null && !enrichedDescription.isEmpty() && 
+                                            !enrichedDescription.equals("No description available") && enrichedDescription.length() > 20) {
+                                            job.description(enrichedDescription);
+                                            System.out.println("[" + getSource() + "] ✅ Enriched description (" + enrichedDescription.length() + " chars)");
+                                        }
+                                    } catch (Exception e) {
+                                        System.err.println("[" + getSource() + "] ⚠️  Error enriching description: " + e.getMessage());
                                     }
-                                } catch (Exception e) {
-                                    System.err.println("[" + getSource() + "] ⚠️  Error enriching description: " + e.getMessage());
                                 }
                             }
                         }
@@ -1384,11 +1580,36 @@ public abstract class BaseJobScraper implements JobScraper {
                             " at " + (!company.equals("NO COMPANY") ? company : "Unknown"));
                     } else {
                         System.err.println("[" + getSource() + "] ⚠️  Skipped job #" + (i + 1) + " - extractJobData returned null");
+                        // Debug: Try to see what's in the element
+                        try {
+                            String elementText = jobElement.textContent();
+                            String elementHTML = jobElement.innerHTML();
+                            System.err.println("[" + getSource() + "]    DEBUG - Element text (first 200 chars): " + 
+                                (elementText != null ? elementText.substring(0, Math.min(200, elementText.length())) : "null"));
+                            System.err.println("[" + getSource() + "]    DEBUG - Element HTML (first 300 chars): " + 
+                                (elementHTML != null ? elementHTML.substring(0, Math.min(300, elementHTML.length())) : "null"));
+                        } catch (Exception debugE) {
+                            System.err.println("[" + getSource() + "]    DEBUG - Could not inspect element: " + debugE.getMessage());
+                        }
                     }
                 } catch (Exception e) {
                     System.err.println("[" + getSource() + "] ❌ Error scraping job " + (i + 1) + ": " + e.getMessage());
                     e.printStackTrace(); // Print full stack trace for debugging
                     // Continue with next job even if this one fails
+                }
+            }
+            
+            // Step 10: Handle pagination (for LinkedIn and other sites that support it)
+            if (getSource().equalsIgnoreCase("LinkedIn")) {
+                try {
+                    System.out.println("[" + getSource() + "] 🔄 Starting pagination to scrape additional pages...");
+                    // Call LinkedIn-specific pagination handler
+                    if (this instanceof com.jobScrapper.scraper.impl.LinkedInScraper) {
+                        ((com.jobScrapper.scraper.impl.LinkedInScraper) this).handlePagination(page, request, sink, workingSelector);
+                    }
+                } catch (Exception e) {
+                    System.err.println("[" + getSource() + "] ⚠️  Error during pagination: " + e.getMessage());
+                    // Continue - pagination is optional
                 }
             }
             
@@ -1533,7 +1754,7 @@ public abstract class BaseJobScraper implements JobScraper {
      * @param jobURL The URL of the job detail page
      * @return The extracted description, or "No description available" if not found
      */
-    protected String extractDescriptionFromDetailPage(Page page, String jobURL) {
+    public String extractDescriptionFromDetailPage(Page page, String jobURL) {
         if (jobURL == null || jobURL.isEmpty()) {
             return "No description available";
         }
