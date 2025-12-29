@@ -65,3 +65,6 @@ jobs_*.json
 jobs_*.csv
 *_interrupted.json
 *_interrupted.csv
+
+# do not send .md files to the repo
+*.md
