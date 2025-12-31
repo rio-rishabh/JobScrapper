@@ -8,9 +8,24 @@ import com.jobscrapper.model.ScrapingJobRequest;
 import java.util.List;
 import java.util.UUID;
 import java.time.OffsetDateTime;
+/**
+ * Glassdoor scraper with ANTI-CLOUDFLARE features:
+ * - AUTO-LOGIN to bypass Cloudflare (logged-in users are trusted)
+ * - Extended scrolling to load all jobs
+ * - Human-like delays between actions
+ * - Smart fallback when Cloudflare blocks detail pages
+ */
 public class GlassDoorScraper extends BaseJobScraper{
     
     private static final String GLASSDOOR_JOBS_URL ="https://www.glassdoor.com/Jobs";
+    
+    // LOGIN CREDENTIALS - Change these to your own
+    private static final String GLASSDOOR_EMAIL = "sharma.rishabh@northeastern.edu";
+    private static final String GLASSDOOR_PASSWORD = "Parthrishabh@448";
+    
+    // Track if we've encountered Cloudflare to avoid hammering detail pages
+    private boolean cloudflareEncountered = false;
+    
     @Override
     public String getSource(){
         return "Glassdoor";  // Must match SourcesEnum.GLASSDOOR value
@@ -59,71 +74,257 @@ public class GlassDoorScraper extends BaseJobScraper{
 
     @Override
     protected String getJobListSelector(){
-        // Glassdoor uses various selectors - try multiple common ones
-        // Based on actual Glassdoor structure: job cards are in ul with class or data attributes
-        // Updated with more modern selectors based on current Glassdoor structure
-        return "ul[data-test='jobListing'] > li, li[data-test='job-listing'], article[data-test='jobListing'], div[data-test='jobListing'], ul.jobsList > li, li.react-job-listing, div.jobContainer, ul[class*='JobsList'] > li, li[class*='JobCard'], div[class*='JobCard'], article[class*='JobCard'], ul[class*='JobsList'] li, li[data-test='jobListing'], div[data-test='job-listing'], article.jobContainer, li.jobContainer, div[class*='jobContainer'], ul[class*='jobListing'] > li";
+        // Glassdoor uses various selectors - UPDATED for 2024 structure
+        // Primary: job cards with data-test attributes (most reliable)
+        // Updated with modern selectors based on current Glassdoor structure
+        return "li[data-test='jobListing'], ul[data-test='jobsList'] > li, div[data-test='jobListing'], li.react-job-listing, div.JobCard, li.JobCard, div[class*='JobCard'], li[class*='JobCard'], article[class*='JobCard'], ul.jobsList > li, div.jobContainer, article.jobContainer, li.jobContainer, div[class*='jobContainer'], ul[class*='JobsList'] > li, div[data-jobid], li[data-jobid]";
+    }
+    
+    /**
+     * Glassdoor needs more scrolling because it uses infinite scroll
+     */
+    @Override
+    protected int getScrollCount(ScrapingJobRequest request) {
+        Integer maxResults = request.getMaxResults();
+        int requested = maxResults != null ? maxResults : 25;
+        // Glassdoor shows about 10-15 jobs per scroll
+        return Math.max(5, (requested / 12) + 2);  // Extra scrolls for safety
+    }
+    
+    /**
+     * Skip detail pages if Cloudflare is actively blocking
+     */
+    @Override
+    protected boolean shouldSkipDetailPages() {
+        return cloudflareEncountered;
     }
 
 
     @Override
     protected void handleLoginIfNeeded(Page page){
+        // STRATEGY: Go directly to Glassdoor (skip Google - it flags automated browsers)
+        // Then login to get full access
+        
         try {
-            String currentUrl = page.url();
-            System.out.println("[" + getSource() + "] Current URL: " + currentUrl);
+            System.out.println("[" + getSource() + "] 🌐 Navigating directly to Glassdoor...");
+            System.out.println("[" + getSource() + "]    (Skipping Google to avoid detection)\n");
             
-            // Wait for page to load
-            page.waitForTimeout(3000);
-
-            // Check for login/verification pages
-            String pageTitle = page.title().toLowerCase();
-            String pageContent = "";
-            try {
-                pageContent = page.content().toLowerCase();
-            } catch (Exception e) {
-                // Continue
+            // ═══════════════════════════════════════════════════════════════════
+            // STEP 1: Go directly to Glassdoor homepage
+            // ═══════════════════════════════════════════════════════════════════
+            System.out.println("[" + getSource() + "] 📍 Step 1: Going to Glassdoor...");
+            page.navigate("https://www.glassdoor.com");
+            humanDelay(page, 4000, 6000);
+            
+            // Handle Cloudflare if present
+            if (waitForCloudflare(page, 60)) {
+                System.out.println("[" + getSource() + "] ✅ Passed Cloudflare check");
             }
             
-            boolean needsLogin = currentUrl.contains("/login") || 
-                                currentUrl.contains("/checkpoint") ||
-                                currentUrl.contains("/signin") ||
-                                pageTitle.contains("sign in") ||
-                                pageContent.contains("sign in") ||
-                                pageContent.contains("log in");
+            humanDelay(page, 2000, 3000);
+
+            // ═══════════════════════════════════════════════════════════════════
+            // STEP 2: Check if already logged in
+            // ═══════════════════════════════════════════════════════════════════
+            System.out.println("[" + getSource() + "] 👤 Step 2: Checking login status...");
+            boolean isLoggedIn = checkIfLoggedIn(page);
             
-            // Check for Cloudflare/verification
-            boolean needsVerification = currentUrl.contains("verify") ||
-                                       currentUrl.contains("challenge") ||
-                                       pageTitle.contains("just a moment") ||
-                                       pageContent.contains("verify you are human") ||
-                                       pageContent.contains("cloudflare");
+            if (isLoggedIn) {
+                System.out.println("[" + getSource() + "] ✅ Already logged in! Proceeding to scrape...");
+                return;
+            }
             
-            if (needsVerification) {
-                System.out.println("[" + getSource() + "] ⚠️  Detected verification page");
-                System.out.println("[" + getSource() + "]    Attempting to handle automatically...");
-                
-                // Try to click verification checkbox (similar to Indeed)
-                try {
-                    Locator checkbox = page.locator("input[type='checkbox'], div[role='checkbox'], label:has-text('Verify')").first();
-                    if (checkbox.count() > 0 && checkbox.isVisible()) {
-                        checkbox.click();
-                        System.out.println("[" + getSource() + "]    ✅ Clicked verification checkbox");
-                        page.waitForTimeout(5000);
+            // ═══════════════════════════════════════════════════════════════════
+            // STEP 3: Click Sign In button on homepage
+            // ═══════════════════════════════════════════════════════════════════
+            System.out.println("[" + getSource() + "] 🔑 Step 3: Clicking Sign In...");
+            System.out.println("[" + getSource() + "]    Email: " + GLASSDOOR_EMAIL);
+            
+            try {
+                // Look for Sign In link/button on homepage
+                Locator signInLink = page.locator("a:has-text('Sign In'), button:has-text('Sign In'), a[href*='login'], a[data-test='sign-in-link']").first();
+                if (signInLink.count() > 0 && signInLink.isVisible()) {
+                    signInLink.click();
+                    humanDelay(page, 3000, 5000);
+                    System.out.println("[" + getSource() + "]    ✅ Clicked Sign In link");
+                } else {
+                    // Navigate directly to login page
+                    page.navigate("https://www.glassdoor.com/profile/login_input.htm");
+                    humanDelay(page, 3000, 5000);
+                }
+            } catch (Exception e) {
+                page.navigate("https://www.glassdoor.com/profile/login_input.htm");
+                humanDelay(page, 3000, 5000);
+            }
+            
+            // Handle Cloudflare on login page
+            if (waitForCloudflare(page, 45)) {
+                System.out.println("[" + getSource() + "] ✅ Passed Cloudflare on login page");
+            }
+            
+            humanDelay(page, 2000, 3000);
+            
+            // ═══════════════════════════════════════════════════════════════════
+            // STEP 4: Enter email (type slowly like a human)
+            // ═══════════════════════════════════════════════════════════════════
+            System.out.println("[" + getSource() + "] ✉️  Step 4: Entering email...");
+            try {
+                Locator emailField = page.locator("input[type='email'], input[name='username'], input#inlineUserEmail, input[data-test='emailInput'], input[name='email']").first();
+                if (emailField.count() > 0) {
+                    emailField.click();
+                    humanDelay(page, 500, 1000);
+                    // Type slowly like a human
+                    emailField.type(GLASSDOOR_EMAIL, new Locator.TypeOptions().setDelay(50));
+                    humanDelay(page, 1000, 2000);
+                    System.out.println("[" + getSource() + "]    ✅ Email entered");
+                } else {
+                    System.err.println("[" + getSource() + "]    ❌ Could not find email field");
                     }
                 } catch (Exception e) {
-                    System.out.println("[" + getSource() + "]    Could not auto-click verification");
+                System.err.println("[" + getSource() + "]    Error entering email: " + e.getMessage());
+            }
+            
+            // Click continue/next button if there's a two-step login
+                try {
+                Locator continueBtn = page.locator("button[type='submit'], button:has-text('Continue'), button:has-text('Next'), button[data-test='continueButton']").first();
+                if (continueBtn.count() > 0 && continueBtn.isVisible()) {
+                    System.out.println("[" + getSource() + "]    Clicking continue...");
+                    continueBtn.click();
+                    humanDelay(page, 2000, 3000);
+                    }
+                } catch (Exception e) {
+                // May not have a continue button, that's okay
+            }
+            
+            // ═══════════════════════════════════════════════════════════════════
+            // STEP 5: Enter password (type slowly like a human)
+            // ═══════════════════════════════════════════════════════════════════
+            System.out.println("[" + getSource() + "] 🔒 Step 5: Entering password...");
+                try {
+                Locator passwordField = page.locator("input[type='password'], input[name='password'], input#inlineUserPassword, input[data-test='passwordInput']").first();
+                if (passwordField.count() > 0) {
+                    passwordField.click();
+                    humanDelay(page, 500, 1000);
+                    // Type slowly like a human
+                    passwordField.type(GLASSDOOR_PASSWORD, new Locator.TypeOptions().setDelay(50));
+                    humanDelay(page, 1000, 2000);
+                    System.out.println("[" + getSource() + "]    ✅ Password entered");
+                } else {
+                    System.err.println("[" + getSource() + "]    ❌ Could not find password field");
+                    }
+                } catch (Exception e) {
+                System.err.println("[" + getSource() + "]    Error entering password: " + e.getMessage());
+            }
+            
+            // ═══════════════════════════════════════════════════════════════════
+            // STEP 6: Click Sign In button
+            // ═══════════════════════════════════════════════════════════════════
+            System.out.println("[" + getSource() + "] 🚀 Step 6: Clicking Sign In button...");
+            try {
+                Locator signInBtn = page.locator("button[type='submit'], button:has-text('Sign In'), button:has-text('Log In'), button[data-test='signInButton'], button[name='submit']").first();
+                if (signInBtn.count() > 0) {
+                    signInBtn.click();
+                    humanDelay(page, 5000, 8000);  // Wait for login to complete
+                    System.out.println("[" + getSource() + "]    ✅ Sign In clicked");
+                } else {
+                    // Try pressing Enter instead
+                    page.keyboard().press("Enter");
+                    humanDelay(page, 5000, 8000);
+                }
+            } catch (Exception e) {
+                System.err.println("[" + getSource() + "]    Error clicking sign in: " + e.getMessage());
+            }
+            
+            // Handle any CAPTCHA or verification
+            humanDelay(page, 3000, 5000);
+            String currentUrl = page.url().toLowerCase();
+            if (currentUrl.contains("captcha") || currentUrl.contains("verify") || currentUrl.contains("challenge")) {
+                System.out.println("[" + getSource() + "] ⚠️  CAPTCHA or verification required!");
+                System.out.println("[" + getSource() + "]    Please complete it manually in the browser...");
+                System.out.println("[" + getSource() + "]    Waiting 45 seconds...");
+                humanDelay(page, 45000, 50000);
+            }
+            
+            // ═══════════════════════════════════════════════════════════════════
+            // STEP 7: Verify login was successful
+            // ═══════════════════════════════════════════════════════════════════
+            System.out.println("[" + getSource() + "] ✅ Step 7: Verifying login...");
+            humanDelay(page, 2000, 3000);
+            isLoggedIn = checkIfLoggedIn(page);
+            
+            if (isLoggedIn) {
+                System.out.println("[" + getSource() + "] 🎉 LOGIN SUCCESSFUL! Ready to scrape jobs...\n");
+            } else {
+                System.out.println("[" + getSource() + "] ⚠️  Login may not have completed. Check browser window.");
+                System.out.println("[" + getSource() + "]    Waiting 30 more seconds for manual completion if needed...");
+                humanDelay(page, 30000, 35000);
+            }
+            
+        } catch (Exception e) {
+            System.err.println("[" + getSource() + "] Error in handleLoginIfNeeded: " + e.getMessage());
+            e.printStackTrace();
+        }
+    }
+    
+    /**
+     * Check if user is logged in to Glassdoor
+     */
+    private boolean checkIfLoggedIn(Page page) {
+        try {
+            // Look for logged-in indicators
+            Locator profileMenu = page.locator("button[data-test='desktop-profile-header'], div[class*='ProfileAvatar'], a[href*='/member/profile'], a[href*='/member/home']").first();
+            Locator signOutLink = page.locator("a[href*='signout'], a:has-text('Sign Out')").first();
+            Locator accountLink = page.locator("a[href*='/member/'], div[class*='account']").first();
+            
+            if (profileMenu.count() > 0 || signOutLink.count() > 0 || accountLink.count() > 0) {
+                return true;
+            }
+            
+            // Also check if we're on a member page
+            String currentUrl = page.url();
+            if (currentUrl.contains("/member/") || currentUrl.contains("/profile/")) {
+                return true;
+                        }
+                    } catch (Exception e) {
+            // Couldn't check
+        }
+        return false;
+    }
+    
+    /**
+     * Wait for Cloudflare challenge to pass
+     * @return true if Cloudflare was detected and passed, false if no Cloudflare
+     */
+    private boolean waitForCloudflare(Page page, int maxWaitSeconds) {
+        try {
+            String pageTitle = page.title().toLowerCase();
+            String pageUrl = page.url().toLowerCase();
+            
+            boolean isCloudflare = pageTitle.contains("just a moment") || 
+                                   pageUrl.contains("challenge") || 
+                                   pageUrl.contains("verify");
+            
+            if (!isCloudflare) {
+                return false;  // No Cloudflare detected
+            }
+            
+            System.out.println("[" + getSource() + "] ⚠️  Cloudflare detected! Waiting for it to pass...");
+            System.out.println("[" + getSource() + "]    If stuck, complete the challenge manually in the browser");
+            
+            for (int i = 0; i < maxWaitSeconds; i += 3) {
+                humanDelay(page, 3000, 3500);
+                pageTitle = page.title().toLowerCase();
+                pageUrl = page.url().toLowerCase();
+                
+                if (!pageTitle.contains("just a moment") && !pageUrl.contains("challenge") && !pageUrl.contains("verify")) {
+                    return true;  // Cloudflare passed
                 }
             }
             
-            if(needsLogin){
-                System.out.println("[" + getSource() + "] ⚠️  WARNING: Glassdoor is showing a login page!");
-                System.out.println("[" + getSource() + "]    Please log in manually in the browser window.");
-                System.out.println("[" + getSource() + "]    Waiting 30 seconds for you to log in...");
-                page.waitForTimeout(30000); // Wait 30 seconds for manual login
-                System.out.println("[" + getSource() + "]    Continuing after login wait...");
-            }
+            System.out.println("[" + getSource() + "] ⚠️  Cloudflare still present after " + maxWaitSeconds + " seconds");
+            return true;  // Cloudflare was detected (even if not fully passed)
         } catch (Exception e) {
-            System.err.println("[" + getSource() + "] Error in handleLoginIfNeeded: " + e.getMessage());
+            return false;
         }
     }
 
@@ -296,7 +497,8 @@ public class GlassDoorScraper extends BaseJobScraper{
         }
         
         // If snippet is short or not found, try to get full description from detail page
-        if (description.equals("No description available") || description.length() < 100) {
+        // BUT: Skip if we've already encountered Cloudflare (to avoid repeated blocks)
+        if (!cloudflareEncountered && (description.equals("No description available") || description.length() < 100)) {
             if (jobURL != null && !jobURL.isEmpty()) {
                 try {
                     System.out.println("[" + getSource() + "] 📄 Navigating to job detail page to extract full description...");
@@ -305,28 +507,70 @@ public class GlassDoorScraper extends BaseJobScraper{
                     // Save current URL to navigate back
                     String originalUrl = page.url();
                     
+                    // Add human-like delay before navigation
+                    humanDelay(page, 1500, 3000);
+                    
                     // Navigate to job detail page
                     page.navigate(jobURL);
                     page.waitForLoadState();
-                    page.waitForTimeout(5000); // Increased wait for initial load
+                    humanDelay(page, 3000, 5000); // Human-like wait for initial load
                     
                     // Check page state
                     String pageTitle = page.title();
                     String pageUrl = page.url();
+                    String pageContent = "";
+                    try {
+                        pageContent = page.content().toLowerCase();
+                    } catch (Exception e) {
+                        // Continue
+                    }
                     System.out.println("[" + getSource() + "]    Page loaded - Title: " + pageTitle);
                     System.out.println("[" + getSource() + "]    Page loaded - URL: " + pageUrl);
                     
-                    // Check if login/verification is required
+                    // Comprehensive Cloudflare detection
                     String pageTitleLower = pageTitle.toLowerCase();
                     String pageUrlLower = pageUrl.toLowerCase();
-                    if (pageTitleLower.contains("sign in") || pageTitleLower.contains("login") || 
-                        pageUrlLower.contains("verify") || pageUrlLower.contains("challenge") ||
+                    boolean isCloudflarePage = 
+                        pageTitleLower.contains("just a moment") ||
+                        pageTitleLower.contains("verification required") ||
+                        pageUrlLower.contains("verify") || 
+                        pageUrlLower.contains("challenge") ||
+                        pageUrlLower.contains("cf-") ||
+                        pageContent.contains("additional verification required") ||
+                        pageContent.contains("help us protect") ||
+                        pageContent.contains("verify you are human") ||
+                        pageContent.contains("cloudflare") ||
+                        pageContent.contains("ray id");
+                    
+                    // Check if login/verification is required
+                    boolean needsLogin = pageTitleLower.contains("sign in") || pageTitleLower.contains("login") || 
                         pageUrlLower.contains("login") || pageUrlLower.contains("account") ||
-                        pageUrlLower.contains("authwall")) {
+                        pageUrlLower.contains("authwall");
+                    
+                    if (isCloudflarePage) {
+                        System.err.println("[" + getSource() + "] ⚠️  Cloudflare challenge detected on job detail page!");
+                        System.err.println("[" + getSource() + "]    Cannot extract description - Cloudflare is blocking access");
+                        System.err.println("[" + getSource() + "]    Page URL: " + pageUrl);
+                        System.err.println("[" + getSource() + "]    Using snippet from search results instead");
+                        System.err.println("[" + getSource() + "]    ⚠️  Skipping detail pages for remaining jobs to avoid more Cloudflare blocks");
+                        
+                        // Mark that we've hit Cloudflare - stop trying detail pages
+                        cloudflareEncountered = true;
+                        
+                        // Navigate back to search results
+                        humanDelay(page, 1000, 2000);
+                        page.navigate(originalUrl);
+                        page.waitForLoadState();
+                    } else if (needsLogin) {
                         System.err.println("[" + getSource() + "] ⚠️  Login/verification required to view job description");
                         System.err.println("[" + getSource() + "]    Page redirected to: " + pageUrl);
                         System.err.println("[" + getSource() + "]    Please log in to Glassdoor in the main browser window");
                         System.err.println("[" + getSource() + "]    Then descriptions will be available on next run");
+                        
+                        // Navigate back to search results
+                        humanDelay(page, 1000, 2000);
+                        page.navigate(originalUrl);
+                        page.waitForLoadState();
                     } else {
                         // Wait more for dynamic content to load
                         page.waitForTimeout(3000);
