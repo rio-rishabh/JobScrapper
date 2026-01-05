@@ -1,0 +1,7 @@
+{
+  "sources": ["LinkedIn", "Indeed", "Glassdoor"],
+  "keywords": ["software engineer", "2026 graduate"],
+  "location": "Boston, MA",
+  "maxResults": 50
+}
+

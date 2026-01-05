@@ -1,0 +1,6 @@
+{
+  "scrapingId": "scrape_1766687802900_1so7ib",
+  "status": "FAILED",
+  "error": "\nFAILURE: Build failed with an exception.\n\n* What went wrong:\nTask 'runMcpScraper' not found in root project 'jobScrapper'.\n\n* Try:\n> Run gradlew tasks to get a list of available tasks.\n> For more on name expansion, please refer to https://docs.gradle.org/9.1.0/userguide/command_line_interface.html#sec:name_abbreviation in the Gradle documentation.\n> Run with --stacktrace option to get the stack trace.\n> Run with --info or --debug option to get more log output.\n> Run with --scan to generate a Bu",
+  "completedAt": "2025-12-25T18:36:44.275Z"
+}

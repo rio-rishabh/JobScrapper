@@ -1,0 +1,36 @@
+{
+  "name": "jobscrapper-mcp-server",
+  "version": "1.0.0",
+  "description": "MCP server for JobScrapper - exposes job scraping functionality via Model Context Protocol",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "jobscrapper-mcp-server": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts",
+    "watch": "tsc --watch",
+    "sync-new-jobs": "tsx src/syncNewJobs.ts",
+    "sync-new-jobs:prod": "npm run build && node dist/syncNewJobs.js"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "job-scraper",
+    "jobs"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.25.1",
+    "@notionhq/client": "^5.6.0",
+    "mammoth": "^1.11.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.3"
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "jobscrapper": {
+      "command": "node",
+      "args": [
+        "/absolute/path/to/JobScrapper/mcp-server/dist/index.js"
+      ],
+      "env": {
+        "JOBSCRAPPER_API_URL": "http://localhost:8080/api"
+      }
+    }
+  }
+}
+

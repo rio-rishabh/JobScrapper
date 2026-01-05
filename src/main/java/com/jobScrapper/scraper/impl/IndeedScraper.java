@@ -18,10 +18,18 @@ import java.util.UUID;
  * - CSS selectors (Indeed's HTML structure)
  * - Data extraction (Indeed's job card format)
  * - No login needed for Indeed
+ * 
+ * ANTI-CLOUDFLARE FEATURES:
+ * - Extended scrolling to load all jobs (Indeed uses infinite scroll)
+ * - Human-like delays between actions
+ * - Fallback to snippet when Cloudflare blocks detail pages
  */
 public class IndeedScraper extends BaseJobScraper {
 
     private static final String INDEED_JOBS_URL = "https://www.indeed.com/jobs";
+    
+    // Track if we've encountered Cloudflare to avoid hammering detail pages
+    private boolean cloudflareEncountered = false;
 
     @Override
     public String getSource() {
@@ -50,36 +58,77 @@ public class IndeedScraper extends BaseJobScraper {
         if (location != null && !location.isEmpty()) {
             url.append("&l=").append(location.replace(" ", "+").replace(",", "%2C"));
         }
+        
+        // Request more results per page
+        url.append("&limit=50");  // Request 50 results per page
 
         return url.toString();
     }
 
     @Override
     protected String getJobListSelector() {
-        // Indeed's job listing selector - try multiple common selectors
-        // Indeed uses various structures, so we'll try the most common ones
-        return "div[data-jk], div.job_seen_beacon, ul#jobResultsList > li, div.jobsearch-SerpJobCard";
+        // Indeed's job listing selector - UPDATED for 2024 structure
+        // Primary: job cards with data-jk attribute (most reliable)
+        // Fallback: various container classes Indeed uses
+        return "div[data-jk], li.css-5lfssm, div.job_seen_beacon, div.jobsearch-ResultsList > div, ul.jobsearch-ResultsList > li, div[class*='jobCard'], div.resultContent, div[class*='result']";
+    }
+    
+    /**
+     * Indeed needs more scrolling because it uses infinite scroll
+     */
+    @Override
+    protected int getScrollCount(ScrapingJobRequest request) {
+        Integer maxResults = request.getMaxResults();
+        int requested = maxResults != null ? maxResults : 25;
+        // Indeed shows about 15 jobs per page/scroll - need more scrolls
+        return Math.max(5, (requested / 15) + 2);  // Extra scrolls for safety
+    }
+    
+    /**
+     * Skip detail pages if Cloudflare is actively blocking
+     */
+    @Override
+    protected boolean shouldSkipDetailPages() {
+        return cloudflareEncountered;
     }
 
     @Override
     protected void handleLoginIfNeeded(Page page) {
-        // Indeed may show Cloudflare verification page
-        // Check if we're on a verification page and handle it automatically
+        // STRATEGY: Go directly to Indeed (skip Google - it flags automated browsers)
         
         try {
-            // Wait for page to fully load
-            page.waitForTimeout(3000);
+            System.out.println("[" + getSource() + "] 🌐 Navigating directly to Indeed...");
+            System.out.println("[" + getSource() + "]    (Skipping Google to avoid detection)\n");
             
+            // ═══════════════════════════════════════════════════════════════════
+            // STEP 1: Go directly to Indeed homepage
+            // ═══════════════════════════════════════════════════════════════════
+            System.out.println("[" + getSource() + "] 📍 Step 1: Going to Indeed...");
+            page.navigate("https://www.indeed.com");
+            humanDelay(page, 4000, 6000);
+            
+            // ═══════════════════════════════════════════════════════════════════
+            // STEP 2: Handle Cloudflare if present
+            // ═══════════════════════════════════════════════════════════════════
+            System.out.println("[" + getSource() + "] 🛡️  Step 2: Handling any Cloudflare checks...");
+            if (waitForCloudflareIndeed(page, 60)) {
+                System.out.println("[" + getSource() + "] ✅ Passed Cloudflare check");
+            }
+            
+            humanDelay(page, 2000, 3000);
+            System.out.println("[" + getSource() + "] ✅ Ready to search for jobs!\n");
+            
+            // Check current page state
             String currentUrl = page.url();
             String pageTitle = page.title().toLowerCase();
             String pageContent = "";
             try {
                 pageContent = page.content().toLowerCase();
             } catch (Exception e) {
-                // If we can't get content, try anyway
+                // Continue
             }
             
-            // Check for Cloudflare verification indicators (based on the image description)
+            // Check for Cloudflare verification indicators
             boolean isVerificationPage = 
                 currentUrl.contains("verify") || 
                 currentUrl.contains("challenge") ||
@@ -473,6 +522,48 @@ public class IndeedScraper extends BaseJobScraper {
             }
         }
     }
+    
+    /**
+     * Wait for Cloudflare challenge to pass on Indeed
+     * @return true if Cloudflare was detected and passed, false if no Cloudflare
+     */
+    private boolean waitForCloudflareIndeed(Page page, int maxWaitSeconds) {
+        try {
+            String pageTitle = page.title().toLowerCase();
+            String pageUrl = page.url().toLowerCase();
+            
+            boolean isCloudflare = pageTitle.contains("just a moment") || 
+                                   pageUrl.contains("challenge") || 
+                                   pageUrl.contains("verify") ||
+                                   pageTitle.contains("additional verification");
+            
+            if (!isCloudflare) {
+                return false;  // No Cloudflare detected
+            }
+            
+            System.out.println("[" + getSource() + "] ⚠️  Cloudflare detected! Waiting for it to pass...");
+            System.out.println("[" + getSource() + "]    If stuck, complete the challenge manually in the browser");
+            
+            for (int i = 0; i < maxWaitSeconds; i += 3) {
+                humanDelay(page, 3000, 3500);
+                pageTitle = page.title().toLowerCase();
+                pageUrl = page.url().toLowerCase();
+                
+                if (!pageTitle.contains("just a moment") && 
+                    !pageUrl.contains("challenge") && 
+                    !pageUrl.contains("verify") &&
+                    !pageTitle.contains("additional verification")) {
+                    System.out.println("[" + getSource() + "] ✅ Cloudflare passed!");
+                    return true;
+                }
+            }
+            
+            System.out.println("[" + getSource() + "] ⚠️  Cloudflare still present after " + maxWaitSeconds + " seconds");
+            return true;  // Cloudflare was detected
+        } catch (Exception e) {
+            return false;
+        }
+    }
 
     @Override
     protected Job extractJobData(Locator jobElement, Page page) {
@@ -578,7 +669,8 @@ public class IndeedScraper extends BaseJobScraper {
         }
         
         // If snippet is short or not found, try to get full description from detail page
-        if (description.equals("No description available") || description.length() < 100) {
+        // BUT: Skip if we've already encountered Cloudflare (to avoid repeated blocks)
+        if (!cloudflareEncountered && (description.equals("No description available") || description.length() < 100)) {
             if (!jobURL.isEmpty()) {
                 try {
                     System.out.println("[" + getSource() + "] 📄 Navigating to job detail page to extract full description...");
@@ -587,27 +679,78 @@ public class IndeedScraper extends BaseJobScraper {
                     // Save current URL to navigate back
                     String originalUrl = page.url();
                     
+                    // Add human-like delay before navigation
+                    humanDelay(page, 1500, 3000);
+                    
                     // Navigate to job detail page
                     page.navigate(jobURL);
                     page.waitForLoadState();
-                    page.waitForTimeout(5000); // Increased wait for initial load
+                    humanDelay(page, 3000, 5000); // Human-like wait for initial load
                     
                     // Check page state
                     String pageTitle = page.title();
                     String pageUrl = page.url();
+                    String pageContent = "";
+                    try {
+                        pageContent = page.content().toLowerCase();
+                    } catch (Exception e) {
+                        // Continue
+                    }
+                    
                     System.out.println("[" + getSource() + "]    Page loaded - Title: " + pageTitle);
                     System.out.println("[" + getSource() + "]    Page loaded - URL: " + pageUrl);
                     
-                    // Check if login/verification is required
+                    // Comprehensive Cloudflare detection
                     String pageTitleLower = pageTitle.toLowerCase();
                     String pageUrlLower = pageUrl.toLowerCase();
-                    if (pageTitleLower.contains("sign in") || pageTitleLower.contains("login") || 
-                        pageUrlLower.contains("verify") || pageUrlLower.contains("challenge") ||
-                        pageUrlLower.contains("login") || pageUrlLower.contains("account")) {
-                        System.err.println("[" + getSource() + "] ⚠️  Login/verification required to view job description");
+                    boolean isCloudflarePage = 
+                        pageTitleLower.contains("just a moment") ||
+                        pageTitleLower.contains("verification required") ||
+                        pageUrlLower.contains("verify") || 
+                        pageUrlLower.contains("challenge") ||
+                        pageUrlLower.contains("cf-") ||
+                        pageContent.contains("additional verification required") ||
+                        pageContent.contains("help us protect") ||
+                        pageContent.contains("verify you are human") ||
+                        pageContent.contains("cloudflare") ||
+                        pageContent.contains("ray id") ||
+                        pageContent.contains("challenges.cloudflare.com") ||
+                        pageContent.contains("enable javascript and cookies") ||
+                        page.locator("text=/Additional Verification Required/i").count() > 0 ||
+                        page.locator("text=/Help Us Protect/i").count() > 0 ||
+                        page.locator("text=/Please unblock challenges.cloudflare.com/i").count() > 0;
+                    
+                    // Check if login/verification is required
+                    boolean needsLogin = pageTitleLower.contains("sign in") || 
+                                       pageTitleLower.contains("login") ||
+                                       pageUrlLower.contains("login") || 
+                                       pageUrlLower.contains("account");
+                    
+                    if (isCloudflarePage) {
+                        System.err.println("[" + getSource() + "] ⚠️  Cloudflare challenge detected on job detail page!");
+                        System.err.println("[" + getSource() + "]    Cannot extract description - Cloudflare is blocking access");
+                        System.err.println("[" + getSource() + "]    Page URL: " + pageUrl);
+                        System.err.println("[" + getSource() + "]    Using snippet from search results instead");
+                        System.err.println("[" + getSource() + "]    ⚠️  Skipping detail pages for remaining jobs to avoid more Cloudflare blocks");
+                        
+                        // Mark that we've hit Cloudflare - stop trying detail pages
+                        cloudflareEncountered = true;
+                        
+                        // Navigate back to search results
+                        humanDelay(page, 1000, 2000);
+                        page.navigate(originalUrl);
+                        page.waitForLoadState();
+                        // Don't try to extract description - use what we have from snippet
+                        // Continue to end of method with current description
+                    } else if (needsLogin) {
+                        System.err.println("[" + getSource() + "] ⚠️  Login required to view job description");
                         System.err.println("[" + getSource() + "]    Page redirected to: " + pageUrl);
                         System.err.println("[" + getSource() + "]    Please log in to Indeed in the main browser window");
                         System.err.println("[" + getSource() + "]    Then descriptions will be available on next run");
+                        // Navigate back to search results
+                        page.navigate(originalUrl);
+                        page.waitForLoadState();
+                        // Use snippet instead - continue to end of method
                     } else {
                         // Wait more for dynamic content to load
                         page.waitForTimeout(3000);
@@ -649,6 +792,17 @@ public class IndeedScraper extends BaseJobScraper {
                                     // Try textContent first
                                     String descText = descLocator.textContent();
                                     if (descText != null && !descText.trim().isEmpty() && descText.trim().length() > 50) {
+                                        // Check if description contains Cloudflare content
+                                        String descTextLower = descText.toLowerCase();
+                                        if (descTextLower.contains("additional verification required") ||
+                                            descTextLower.contains("cloudflare") ||
+                                            descTextLower.contains("ray id") ||
+                                            descTextLower.contains("challenges.cloudflare.com") ||
+                                            descTextLower.contains("enable javascript and cookies")) {
+                                            System.err.println("[" + getSource() + "] ⚠️  Description contains Cloudflare content - rejecting");
+                                            continue; // Try next selector
+                                        }
+                                        
                                         description = descText.trim();
                                         System.out.println("[" + getSource() + "] ✅ Found description (" + description.length() + " chars) using selector: " + selector);
                                         found = true;
@@ -659,7 +813,25 @@ public class IndeedScraper extends BaseJobScraper {
                                     if (!found) {
                                         String innerHtml = descLocator.innerHTML();
                                         if (innerHtml != null && !innerHtml.trim().isEmpty() && innerHtml.trim().length() > 50) {
+                                            // Check if innerHTML contains Cloudflare content
+                                            String innerHtmlLower = innerHtml.toLowerCase();
+                                            if (innerHtmlLower.contains("additional verification required") ||
+                                                innerHtmlLower.contains("cloudflare") ||
+                                                innerHtmlLower.contains("ray id") ||
+                                                innerHtmlLower.contains("challenges.cloudflare.com")) {
+                                                System.err.println("[" + getSource() + "] ⚠️  innerHTML contains Cloudflare content - rejecting");
+                                                continue; // Try next selector
+                                            }
+                                            
                                             description = innerHtml.replaceAll("<[^>]*>", "").trim(); // Strip HTML tags
+                                            
+                                            // Final check on extracted text
+                                            if (description.toLowerCase().contains("additional verification") ||
+                                                description.toLowerCase().contains("ray id")) {
+                                                System.err.println("[" + getSource() + "] ⚠️  Extracted text contains Cloudflare content - rejecting");
+                                                continue; // Try next selector
+                                            }
+                                            
                                             System.out.println("[" + getSource() + "] ✅ Found description (innerHTML) (" + description.length() + " chars) using selector: " + selector);
                                             found = true;
                                             break;
@@ -701,15 +873,44 @@ public class IndeedScraper extends BaseJobScraper {
                                 try {
                                     String pageText = page.locator("body").textContent();
                                     if (pageText != null && pageText.length() > 100) {
-                                        // Extract a reasonable portion (look for job description keywords)
-                                        int startIdx = pageText.toLowerCase().indexOf("job description");
-                                        if (startIdx == -1) startIdx = pageText.toLowerCase().indexOf("about the job");
-                                        if (startIdx == -1) startIdx = pageText.toLowerCase().indexOf("responsibilities");
-                                        if (startIdx == -1) startIdx = 0;
-                                        
-                                        int endIdx = Math.min(startIdx + 3000, pageText.length());
-                                        description = pageText.substring(startIdx, endIdx).trim();
-                                        System.out.println("[" + getSource() + "] ⚠️  Using page text as fallback (" + description.length() + " chars)");
+                                        // Check if page text contains Cloudflare indicators
+                                        String pageTextLower = pageText.toLowerCase();
+                                        if (pageTextLower.contains("additional verification required") ||
+                                            pageTextLower.contains("cloudflare") ||
+                                            pageTextLower.contains("ray id") ||
+                                            pageTextLower.contains("challenges.cloudflare.com") ||
+                                            pageTextLower.contains("enable javascript and cookies")) {
+                                            System.err.println("[" + getSource() + "] ⚠️  Page text contains Cloudflare content - rejecting");
+                                            // Navigate back and use snippet
+                                            page.navigate(originalUrl);
+                                            page.waitForLoadState();
+                                            // Use snippet instead - don't update description
+                                            found = false; // Mark as not found so we use snippet
+                                        } else {
+                                            // Extract a reasonable portion (look for job description keywords)
+                                            int startIdx = pageText.toLowerCase().indexOf("job description");
+                                            if (startIdx == -1) startIdx = pageText.toLowerCase().indexOf("about the job");
+                                            if (startIdx == -1) startIdx = pageText.toLowerCase().indexOf("responsibilities");
+                                            if (startIdx == -1) startIdx = 0;
+                                            
+                                            int endIdx = Math.min(startIdx + 3000, pageText.length());
+                                            String extractedText = pageText.substring(startIdx, endIdx).trim();
+                                            
+                                            // Final check: reject if it looks like Cloudflare content
+                                            if (extractedText.toLowerCase().contains("additional verification") ||
+                                                extractedText.toLowerCase().contains("ray id") ||
+                                                extractedText.toLowerCase().contains("challenges.cloudflare")) {
+                                                System.err.println("[" + getSource() + "] ⚠️  Extracted text contains Cloudflare content - rejecting");
+                                                page.navigate(originalUrl);
+                                                page.waitForLoadState();
+                                                // Use snippet instead - don't update description
+                                                found = false; // Mark as not found so we use snippet
+                                            } else {
+                                                description = extractedText;
+                                                System.out.println("[" + getSource() + "] ⚠️  Using page text as fallback (" + description.length() + " chars)");
+                                                found = true;
+                                            }
+                                        }
                                     }
                                 } catch (Exception e) {
                                     System.err.println("[" + getSource() + "]    Error extracting page text: " + e.getMessage());
@@ -745,8 +946,21 @@ public class IndeedScraper extends BaseJobScraper {
             }
         }
         
+        // Final check: Reject description if it contains Cloudflare content
+        String descLower = description.toLowerCase();
+        if (descLower.contains("additional verification required") ||
+            descLower.contains("cloudflare") ||
+            descLower.contains("ray id") ||
+            descLower.contains("challenges.cloudflare.com") ||
+            descLower.contains("enable javascript and cookies") ||
+            descLower.contains("please unblock challenges")) {
+            System.err.println("[" + getSource() + "] ⚠️  Final check: Description contains Cloudflare content - rejecting");
+            description = "No description available (Cloudflare blocked access)";
+        }
+        
         // Final check for description length
-        if (description.length() < 50 && !description.equals("No description available")) {
+        if (description.length() < 50 && !description.equals("No description available") && 
+            !description.equals("No description available (Cloudflare blocked access)")) {
             System.out.println("[" + getSource() + "] ⚠️  Description is too short (" + description.length() + " chars), falling back to 'No description available'");
             description = "No description available";
         }

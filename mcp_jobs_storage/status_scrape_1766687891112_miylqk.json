@@ -1,0 +1,6 @@
+{
+  "scrapingId": "scrape_1766687891112_miylqk",
+  "status": "FAILED",
+  "error": "Parse error: SyntaxError: Expected property name or '}' in JSON at position 1 (line 1 column 2)",
+  "completedAt": "2025-12-25T19:50:42.211Z"
+}
